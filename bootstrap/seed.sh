@@ -106,6 +106,7 @@ resolve_sub() { # <stage> <jq path>
 }
 
 ST_SUB=()
+ST_SHARED_SUB=()
 ST_LOC=()
 ST_RG=()
 ST_CLUSTER=()
@@ -116,7 +117,9 @@ ST_API_HOST=()
 i=0
 for st in $ALL_STAGES; do
   sub="$(resolve_sub "$st" .subscriptionId)" || exit 2
+  shared_sub="$(resolve_sub "$st" .shared.subscriptionId)" || exit 2
   ST_SUB+=("$sub")
+  ST_SHARED_SUB+=("$shared_sub")
   ST_LOC+=("$(stage_get "$st" .location)")
   ST_RG+=("$(stage_get "$st" .resourceGroup)")
   ST_CLUSTER+=("$(stage_get "$st" .cluster)")
@@ -128,9 +131,9 @@ for st in $ALL_STAGES; do
 done
 n_stages=$i
 
-# The shared group holds the DNS zone; it is described identically in every stage file.
+# The shared group holds the DNS zone; validate_distinct has checked that every stage file describes it identically.
 first_stage="$(printf '%s' "$ALL_STAGES" | cut -d' ' -f1)"
-SHARED_SUB="$(resolve_sub "$first_stage" .shared.subscriptionId)"
+SHARED_SUB="${ST_SHARED_SUB[0]}"
 SHARED_RG="$(stage_get "$first_stage" .shared.resourceGroup)"
 SHARED_LOC="$(stage_get "$first_stage" .shared.location)"
 
@@ -352,7 +355,8 @@ i=0
 for st in $ALL_STAGES; do
   sub="${ST_SUB[$i]}"
   rg_scope="$(rg_id "$sub" "${ST_RG[$i]}")"
-  shared_scope="$(rg_id "$SHARED_SUB" "$SHARED_RG")"
+  shared_sub="${ST_SHARED_SUB[$i]}"
+  shared_scope="$(rg_id "$shared_sub" "$SHARED_RG")"
   log
   log "Stage $st"
 
@@ -367,8 +371,8 @@ for st in $ALL_STAGES; do
   ensure_role "$sub" "$rg_scope" "$infra_obj" "Role Based Access Control Administrator" "$name" "$(stage_rbac_condition)"
   # The shared group holds only the DNS zone. Contributor there lets the stage deployment create the
   # zone; the RBAC condition allows only the DNS Zone Contributor role.
-  ensure_role "$SHARED_SUB" "$shared_scope" "$infra_obj" "Contributor" "$name"
-  ensure_role "$SHARED_SUB" "$shared_scope" "$infra_obj" "Role Based Access Control Administrator" "$name" "$(rbac_condition "$ROLE_DNS_ZONE_CONTRIBUTOR")"
+  ensure_role "$shared_sub" "$shared_scope" "$infra_obj" "Contributor" "$name"
+  ensure_role "$shared_sub" "$shared_scope" "$infra_obj" "Role Based Access Control Administrator" "$name" "$(rbac_condition "$ROLE_DNS_ZONE_CONTRIBUTOR")"
 
   # web and api: main branch of their private repos. Reader on the stage group to look resources up;
   # the write-type rights are granted per resource by Bicep (bicep/modules).

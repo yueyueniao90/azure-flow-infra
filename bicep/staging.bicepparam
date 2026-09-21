@@ -9,7 +9,9 @@ param registryName = '${stage.registry}${readEnvironmentVariable('AZFLOW_NAME_SU
 param staticWebAppName = stage.staticWebApp
 param staticWebAppLocation = stage.staticWebAppLocation
 param nodeSize = stage.nodeSize
-param sharedSubscriptionId = readEnvironmentVariable('AZFLOW_SUBSCRIPTION_ID', '') // see README: stage files hold $AZFLOW_SUBSCRIPTION_ID
+// The stage file holds a reference such as '$AZFLOW_SUBSCRIPTION_ID' (see README) or a plain value.
+var sharedSubscriptionRef = stage.shared.subscriptionId
+param sharedSubscriptionId = startsWith(sharedSubscriptionRef, '$') ? readEnvironmentVariable(replace(replace(replace(sharedSubscriptionRef, '$', ''), '{', ''), '}', ''), '') : sharedSubscriptionRef
 param sharedResourceGroup = stage.shared.resourceGroup
 param dnsZoneName = stage.shared.dnsZone
 param apiPrincipalId = readEnvironmentVariable('AZFLOW_API_PRINCIPAL_ID', '')

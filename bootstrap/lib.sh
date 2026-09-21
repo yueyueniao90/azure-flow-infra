@@ -133,5 +133,14 @@ validate_distinct() {
       bad=1
     fi
   done
+  # Compare the resolved subscriptions (two references may name the same one); an unset reference compares as written.
+  a="$(stage_get "$stage_a" .shared.subscriptionId)"
+  b="$(stage_get "$stage_b" .shared.subscriptionId)"
+  a="$(resolve_ref "$a" || printf '%s' "$a")"
+  b="$(resolve_ref "$b" || printf '%s' "$b")"
+  if [ "$a" != "$b" ]; then
+    printf '"shared.subscriptionId" differs between stages ("%s" vs "%s"); the shared group is one place\n' "$a" "$b"
+    bad=1
+  fi
   [ "$bad" -eq 0 ]
 }

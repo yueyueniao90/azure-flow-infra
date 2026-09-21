@@ -74,14 +74,15 @@ It needs `AZFLOW_SUBSCRIPTION_ID` set (a dry run shows a placeholder instead).
 | `webHost`, `apiHost` | public hostnames of the stage (used from step 7 on) |
 | `nodeSize` | VM size of the single cluster node (extra key; the preflight recommends a value) |
 | `staticWebAppLocation` | Static Web Apps exist in only a few regions (`westeurope`, `centralus`, `eastus2`, `eastasia`, `westus2`), so this is separate from `location` (extra key) |
-| `shared` | `subscriptionId`, `resourceGroup`, `location`, `dnsZone` of the shared group that holds the DNS zone (extra key; identical in both files) |
+| `shared` | `subscriptionId`, `resourceGroup`, `location`, `dnsZone` of the shared group that holds the DNS zone (extra key; must resolve to the same value in both files) |
 
 **The repository is public, so no subscription ID is committed.** The value is an environment-variable reference
 (`"subscriptionId": "$AZFLOW_SUBSCRIPTION_ID"`) that `preflight.sh` and `seed.sh` expand at run time. Each stage
 carries its own reference so the code already treats every stage as if it could live in its own subscription: to
 split them later, point production at another variable (for example `"$AZFLOW_PROD_SUBSCRIPTION_ID"`), set it, and
-run the seed again. Bicep compiles `AZFLOW_SUBSCRIPTION_ID` only for the shared group's subscription; the deployment
-itself targets whichever subscription the pipeline (or `az --subscription`) selects.
+run the seed again. The `.bicepparam` files read the shared group's subscription from the variable that the stage file's
+`shared.subscriptionId` names; both stage files must resolve it to the same value (the seed and preflight check this).
+The deployment itself targets whichever subscription the pipeline (or `az --subscription`) selects.
 
 `location` is a per-stage setting on purpose: the free trial allows 4 vCPU per region, so one 2-vCPU node per
 cluster only fits when the two stages are in different regions (staging `westeurope`, production `germanywestcentral`).

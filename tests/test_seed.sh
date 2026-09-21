@@ -208,4 +208,29 @@ assert_file_contains "prod scope uses prod subscription" "$FAKE_AZ_STATE/roles.j
 assert_file_contains "prod variable" "$FAKE_AZ_STATE/gh-vars.log" "AZFLOW_PRODUCTION_SUBSCRIPTION_ID	sub-prod"
 rm -rf "$tmp"
 
+section "shared group in its own subscription"
+new_state
+tmp="$(mktemp -d)"
+cp "$REPO_ROOT"/stages/*.json "$tmp/"
+for st in staging production; do
+  jq '.shared.subscriptionId = "$AZFLOW_SHARED_SUBSCRIPTION_ID"' "$tmp/$st.json" >"$tmp/x.json" && mv "$tmp/x.json" "$tmp/$st.json"
+done
+AZFLOW_STAGES_DIR="$tmp" AZFLOW_SHARED_SUBSCRIPTION_ID="sub-shared" run_seed
+assert_eq "exit code" 0 "$RC"
+assert_file_contains "shared group in shared subscription" "$FAKE_AZ_STATE/calls.log" "group create --name rg-azflow-shared --location westeurope --subscription sub-shared"
+assert_file_contains "shared scope uses the shared subscription" "$FAKE_AZ_STATE/roles.jsonl" '"scope":"/subscriptions/sub-shared/resourceGroups/rg-azflow-shared"'
+assert_not_contains "no role on the shared group in the stage subscription" "$(cat "$FAKE_AZ_STATE/roles.jsonl")" '/subscriptions/sub-test/resourceGroups/rg-azflow-shared'
+rm -rf "$tmp"
+
+section "stage files that disagree on the shared subscription"
+new_state
+tmp="$(mktemp -d)"
+cp "$REPO_ROOT"/stages/*.json "$tmp/"
+jq '.shared.subscriptionId = "$AZFLOW_SHARED_SUBSCRIPTION_ID"' "$tmp/production.json" >"$tmp/x.json" && mv "$tmp/x.json" "$tmp/production.json"
+AZFLOW_STAGES_DIR="$tmp" AZFLOW_SHARED_SUBSCRIPTION_ID="sub-shared" run_seed
+assert_eq "exit code" 2 "$RC"
+assert_contains "names the key" "$OUT" "shared.subscriptionId"
+assert_count "nothing was created" 0 "$FAKE_AZ_STATE/calls.log" "group create"
+rm -rf "$tmp"
+
 finish "seed"

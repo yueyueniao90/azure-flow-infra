@@ -51,6 +51,17 @@ for st in staging production; do
   esac
 done
 assert_eq "registry suffix applied" "acrazflowstagingxy7" "$(AZFLOW_NAME_SUFFIX=xy7 bicep_cli build-params staging.bicepparam --stdout | jq -r '.parametersJson | fromjson | .parameters.registryName.value')"
+sub_of() { bicep_cli build-params "$1" --stdout | jq -r '.parametersJson | fromjson | .parameters.sharedSubscriptionId.value'; }
+assert_eq "shared subscription comes from the stage file reference" "sub-shared" "$(AZFLOW_SUBSCRIPTION_ID=sub-shared sub_of staging.bicepparam)"
+assert_eq "unset shared subscription reference stays empty" "" "$(sub_of staging.bicepparam)"
+split="$(mktemp -d)"
+cp -R "$REPO_ROOT/bicep" "$REPO_ROOT/stages" "$split/"
+jq '.subscriptionId = "$AZFLOW_PROD_SUBSCRIPTION_ID" | .shared.subscriptionId = "${AZFLOW_SHARED_SUBSCRIPTION_ID}"' "$split/stages/production.json" >"$split/p.json" && mv "$split/p.json" "$split/stages/production.json"
+assert_eq "split subscriptions: shared value follows the stage file" "sub-shared" \
+  "$(cd "$split/bicep" && AZFLOW_SUBSCRIPTION_ID=sub-prod AZFLOW_PROD_SUBSCRIPTION_ID=sub-prod AZFLOW_SHARED_SUBSCRIPTION_ID=sub-shared sub_of production.bicepparam)"
+jq '.shared.subscriptionId = "00000000-plain"' "$split/stages/production.json" >"$split/p.json" && mv "$split/p.json" "$split/stages/production.json"
+assert_eq "a plain shared subscription value passes through" "00000000-plain" "$(cd "$split/bicep" && AZFLOW_SUBSCRIPTION_ID=sub-prod sub_of production.bicepparam)"
+rm -rf "$split"
 assert_eq "principal ids come from the environment" "11111111-1111-1111-1111-111111111111" \
   "$(AZFLOW_API_PRINCIPAL_ID=11111111-1111-1111-1111-111111111111 bicep_cli build-params staging.bicepparam --stdout | jq -r '.parametersJson | fromjson | .parameters.apiPrincipalId.value')"
 
