@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015,SC2016  # `[ cond ] && pass || fail` is intended; single quotes hold literal $VARS
+# Fake Azure CLI for the offline tests. It never talks to Azure: it logs every call to
+# $FAKE_AZ_STATE/calls.log and answers from small state files (see tests/helpers.sh).
+# Unknown commands fail loudly (exit 99) so a script cannot silently do something untested.
+set -u
+: "${FAKE_AZ_STATE:?FAKE_AZ_STATE must point at a test state directory}"
+S="$FAKE_AZ_STATE"
+printf '%s\n' "$*" >>"$S/calls.log"
+
+opt() { # opt <flag> <args...>: value following the flag
+  local f="$1"
+  shift
+  while [ $# -gt 0 ]; do
+    if [ "$1" = "$f" ]; then
+      printf '%s' "${2:-}"
+      return 0
+    fi
+    shift
+  done
+}
+has() { # has <flag> <args...>
+  local f="$1"
+  shift
+  for a in "$@"; do [ "$a" = "$f" ] && return 0; done
+  return 1
+}
+fail() {
+  printf 'fake az: %s\n' "$*" >&2
+  exit "${2:-1}"
+}
+
+cmd="${1:-} ${2:-}"
+sub3="${3:-}"
+
+case "$cmd" in
+  "account show")
+    [ ! -e "$S/not-logged-in" ] || fail "Please run 'az login'"
+    q="$(opt --query "$@")"
+    case "$q" in
+      tenantId) echo "tenant-fake" ;;
+      id) echo "sub-fake" ;;
+      *) echo '{"id":"sub-fake","tenantId":"tenant-fake"}' ;;
+    esac
+    ;;
+  "provider show")
+    ns="$(opt --namespace "$@")"
+    if [ -f "$S/provider.$ns" ]; then cat "$S/provider.$ns"; else echo NotRegistered; fi
+    ;;
+  "provider register")
+    ns="$(opt --namespace "$@")"
+    printf Registered >"$S/provider.$ns"
+    ;;
+  "vm list-usage")
+    f="$S/usage.$(opt --location "$@").json"
+    [ -f "$f" ] || fail "no usage fixture for region" 1
+    cat "$f"
+    ;;
+  "vm list-skus")
+    has --all "$@" || fail "list-skus without --all hides subscription-restricted sizes" 97
+    f="$S/skus.$(opt --location "$@").json"
+    [ -f "$f" ] || fail "no skus fixture for region" 1
+    cat "$f"
+    ;;
+  "acr check-name")
+    n="$(opt --name "$@")"
+    if [ -e "$S/acr-taken.$n" ]; then echo '{"nameAvailable":false,"reason":"AlreadyExists"}'; else echo '{"nameAvailable":true}'; fi
+    ;;
+  "acr show")
+    [ -e "$S/acr-own.$(opt --name "$@")" ] && echo '{}' || fail "not found" 3
+    ;;
+  "rest "*)
+    [ ! -e "$S/rest-fails" ] || fail "rest not supported" 1
+    n="$(printf '%s' "$(opt --body "$@")" | jq -r .name)"
+    if [ -e "$S/swa-taken.$n" ]; then echo '{"nameAvailable":false,"reason":"AlreadyExists"}'; else echo '{"nameAvailable":true}'; fi
+    ;;
+  "staticwebapp show")
+    [ -e "$S/swa-own.$(opt --name "$@")" ] && echo '{}' || fail "not found" 3
+    ;;
+  "group exists")
+    [ -e "$S/rg.$(opt --name "$@")" ] && echo true || echo false
+    ;;
+  "group create")
+    : >"$S/rg.$(opt --name "$@")"
+    ;;
+  "ad app")
+    case "$sub3" in
+      list)
+        n="$(opt --filter "$@" | sed "s/.*displayName eq '\\(.*\\)'.*/\\1/")"
+        [ -f "$S/app.$n" ] && cat "$S/app.$n"
+        ;;
+      create)
+        n="$(opt --display-name "$@")"
+        printf 'app-%s' "$n" >"$S/app.$n" # the service principal is created separately
+        printf 'app-%s\n' "$n"
+        ;;
+      federated-credential)
+        action="${4:-}"
+        id="$(opt --id "$@")"
+        case "$action" in
+          list)
+            n="$(opt --query "$@" | sed "s/.*name=='\\([^']*\\)'.*/\\1/")"
+            [ -f "$S/fedcred.$id.$n" ] && cat "$S/fedcred.$id.$n"
+            ;;
+          create | update)
+            p="$(opt --parameters "$@")"
+            n="$(printf '%s' "$p" | jq -r .name)"
+            printf '%s\n' "$p" | jq -r .subject >"$S/fedcred.$id.$n"
+            printf '%s\n' "$p" | jq -e '.audiences == ["api://AzureADTokenExchange"] and .issuer == "https://token.actions.githubusercontent.com"' >/dev/null ||
+              fail "unexpected federated credential parameters: $p" 98
+            ;;
+          *) fail "unsupported: $*" 99 ;;
+        esac
+        ;;
+      *) fail "unsupported: $*" 99 ;;
+    esac
+    ;;
+  "ad sp")
+    case "$sub3" in
+      list)
+        a="$(opt --filter "$@" | sed "s/.*appId eq '\\(.*\\)'.*/\\1/")"
+        [ -f "$S/sp.$a" ] && cat "$S/sp.$a"
+        ;;
+      create)
+        a="$(opt --id "$@")"
+        printf 'obj-%s' "${a#app-}" >"$S/sp.$a"
+        printf 'obj-%s\n' "${a#app-}"
+        ;;
+      *) fail "unsupported: $*" 99 ;;
+    esac
+    ;;
+  "role assignment")
+    case "$sub3" in
+      list)
+        touch "$S/roles.jsonl"
+        jq -s --arg o "$(opt --assignee "$@")" --arg r "$(opt --role "$@")" --arg s "$(opt --scope "$@")" \
+          '[.[] | select(.principalId == $o and .roleDefinitionName == $r and (.scope | ascii_downcase) == ($s | ascii_downcase))]' "$S/roles.jsonl"
+        ;;
+      create)
+        # Simulates Entra replication lag: the first N creates fail.
+        if [ -f "$S/role-create-fail-first" ]; then
+          n="$(cat "$S/role-create-fail-first")"
+          if [ "$n" -gt 0 ]; then
+            echo $((n - 1)) >"$S/role-create-fail-first"
+            fail "PrincipalNotFound: principal does not exist in the directory yet" 1
+          fi
+        fi
+        [ "$(opt --assignee-principal-type "$@")" = "ServicePrincipal" ] || fail "role create must pass --assignee-principal-type ServicePrincipal" 96
+        has --condition "$@" && { [ "$(opt --condition-version "$@")" = "2.0" ] || fail "condition needs --condition-version 2.0" 95; }
+        n="$(wc -l <"$S/roles.jsonl" 2>/dev/null | tr -d ' ')"
+        jq -cn --arg id "ra-$((${n:-0} + 1))-$RANDOM" --arg o "$(opt --assignee-object-id "$@")" --arg r "$(opt --role "$@")" \
+          --arg s "$(opt --scope "$@")" --arg c "$(opt --condition "$@")" \
+          '{id: $id, principalId: $o, roleDefinitionName: $r, scope: $s, condition: (if $c == "" then null else $c end)}' >>"$S/roles.jsonl"
+        ;;
+      delete)
+        id="$(opt --ids "$@")"
+        grep -v "\"id\":\"$id\"" "$S/roles.jsonl" >"$S/roles.tmp" || true
+        mv "$S/roles.tmp" "$S/roles.jsonl"
+        ;;
+      *) fail "unsupported: $*" 99 ;;
+    esac
+    ;;
+  "role definition")
+    case "$sub3" in
+      list)
+        n="$(opt --name "$@")"
+        [ -f "$S/roledef.$n" ] && printf '%s\n' "$n"
+        ;;
+      create | update)
+        n="$(printf '%s' "$(opt --role-definition "$@")" | jq -r .Name)"
+        printf '%s' "$(opt --role-definition "$@")" >"$S/roledef.$n"
+        ;;
+      *) fail "unsupported: $*" 99 ;;
+    esac
+    ;;
+  *)
+    fail "unsupported command: $*" 99
+    ;;
+esac

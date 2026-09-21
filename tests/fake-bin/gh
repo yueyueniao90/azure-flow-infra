@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Fake GitHub CLI for the offline tests: records `gh variable set` calls in $FAKE_AZ_STATE/gh-vars.log.
+set -u
+: "${FAKE_AZ_STATE:?}"
+printf '%s\n' "$*" >>"$FAKE_AZ_STATE/gh-calls.log"
+case "${1:-} ${2:-}" in
+  "auth status")
+    [ ! -e "$FAKE_AZ_STATE/gh-not-authenticated" ] || exit 1
+    ;;
+  "variable set")
+    name="$3"
+    shift 3
+    body=""
+    repo=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --body) body="$2" ;;
+        --repo) repo="$2" ;;
+      esac
+      shift
+    done
+    if [ -f "$FAKE_AZ_STATE/gh-fail-repo" ] && [ "$(cat "$FAKE_AZ_STATE/gh-fail-repo")" = "$repo" ]; then exit 1; fi
+    printf '%s\t%s\t%s\n' "$repo" "$name" "$body" >>"$FAKE_AZ_STATE/gh-vars.log"
+    ;;
+  *)
+    echo "fake gh: unsupported: $*" >&2
+    exit 99
+    ;;
+esac

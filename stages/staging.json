@@ -1,0 +1,19 @@
+{
+  "stage": "staging",
+  "subscriptionId": "$AZFLOW_SUBSCRIPTION_ID",
+  "location": "westeurope",
+  "resourceGroup": "rg-azflow-staging",
+  "cluster": "aks-azflow-staging",
+  "registry": "acrazflowstaging",
+  "staticWebApp": "swa-azflow-staging",
+  "staticWebAppLocation": "westeurope",
+  "nodeSize": "Standard_B2s",
+  "webHost": "staging.demo.zzll.de",
+  "apiHost": "api-staging.demo.zzll.de",
+  "shared": {
+    "subscriptionId": "$AZFLOW_SUBSCRIPTION_ID",
+    "resourceGroup": "rg-azflow-shared",
+    "location": "westeurope",
+    "dnsZone": "demo.zzll.de"
+  }
+}

@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# shellcheck disable=SC2015,SC2016  # `[ cond ] && pass || fail` is intended; single quotes hold literal $VARS
+# Bicep: build, lint, and invariants that keep the demo free, keyless and least-privilege.
+# Needs the `bicep` CLI (or `az bicep`); neither talks to a subscription.
+set -euo pipefail
+# shellcheck source=tests/helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/helpers.sh"
+# shellcheck source=bootstrap/lib.sh
+. "$REPO_ROOT/bootstrap/lib.sh"
+
+if command -v bicep >/dev/null 2>&1; then
+  bicep_cli() { bicep "$@"; }
+elif command -v az >/dev/null 2>&1 && az bicep version >/dev/null 2>&1; then
+  bicep_cli() { az bicep "$@"; }
+else
+  if [ "${AZFLOW_SKIP_BICEP:-0}" = 1 ]; then
+    echo "SKIPPED: bicep not available (AZFLOW_SKIP_BICEP=1)"
+    exit 0
+  fi
+  echo "bicep CLI not found. Install it (https://aka.ms/bicep-install, or: az bicep install) or set AZFLOW_SKIP_BICEP=1." >&2
+  exit 1
+fi
+
+cd "$REPO_ROOT/bicep"
+unset AZFLOW_NAME_SUFFIX AZFLOW_SUBSCRIPTION_ID AZFLOW_API_PRINCIPAL_ID AZFLOW_WEB_PRINCIPAL_ID || true
+
+section "build and lint (warnings count as failures)"
+for f in main.bicep modules/*.bicep; do
+  out="$(bicep_cli lint "$f" 2>&1 || true)"
+  assert_eq "lint $f" "" "$out"
+done
+template="$(bicep_cli build main.bicep --stdout 2>&1)" && pass || fail "main.bicep does not build: $template"
+for st in staging production; do
+  out="$(bicep_cli build-params "$st.bicepparam" --stdout 2>&1)" && pass || fail "$st.bicepparam does not build: $out"
+done
+
+section "stage entry points read the stage files"
+params() { bicep_cli build-params "$1.bicepparam" --stdout | jq -r '.parametersJson | fromjson | .parameters'; }
+for st in staging production; do
+  p="$(params "$st")"
+  assert_eq "$st cluster" "$(stage_get "$st" .cluster)" "$(printf '%s' "$p" | jq -r .clusterName.value)"
+  assert_eq "$st registry" "$(stage_get "$st" .registry)" "$(printf '%s' "$p" | jq -r .registryName.value)"
+  assert_eq "$st swa" "$(stage_get "$st" .staticWebApp)" "$(printf '%s' "$p" | jq -r .staticWebAppName.value)"
+  assert_eq "$st location" "$(stage_get "$st" .location)" "$(printf '%s' "$p" | jq -r .location.value)"
+  assert_eq "$st node size" "$(stage_get "$st" .nodeSize)" "$(printf '%s' "$p" | jq -r .nodeSize.value)"
+  assert_eq "$st dns zone" "$(stage_get "$st" .shared.dnsZone)" "$(printf '%s' "$p" | jq -r .dnsZoneName.value)"
+  assert_eq "$st shared rg" "$(stage_get "$st" .shared.resourceGroup)" "$(printf '%s' "$p" | jq -r .sharedResourceGroup.value)"
+  case "$(stage_get "$st" .staticWebAppLocation)" in
+    westeurope | centralus | eastus2 | eastasia | westus2) pass ;;
+    *) fail "$st staticWebAppLocation is not a Static Web Apps region" ;;
+  esac
+done
+assert_eq "registry suffix applied" "acrazflowstagingxy7" "$(AZFLOW_NAME_SUFFIX=xy7 bicep_cli build-params staging.bicepparam --stdout | jq -r '.parametersJson | fromjson | .parameters.registryName.value')"
+assert_eq "principal ids come from the environment" "11111111-1111-1111-1111-111111111111" \
+  "$(AZFLOW_API_PRINCIPAL_ID=11111111-1111-1111-1111-111111111111 bicep_cli build-params staging.bicepparam --stdout | jq -r '.parametersJson | fromjson | .parameters.apiPrincipalId.value')"
+
+section "cost and security invariants of the compiled template"
+# Nested module templates are inlined; flatten every resource declaration.
+res="$(printf '%s' "$template" | jq -c '[.. | objects | select(has("type") and has("apiVersion")) | select(.type != "Microsoft.Resources/deployments")]')"
+q() { printf '%s' "$res" | jq -r "$1"; }
+types="$(q '[.[].type] | unique | .[]')"
+for t in Microsoft.ContainerRegistry/registries Microsoft.ContainerService/managedClusters Microsoft.Web/staticSites Microsoft.Network/dnsZones Microsoft.Authorization/roleAssignments; do
+  assert_contains "declares $t" "$types" "$t"
+done
+for t in Microsoft.KeyVault Microsoft.OperationalInsights Microsoft.Insights Microsoft.Monitor Microsoft.Compute Microsoft.Network/publicIPAddresses Microsoft.Network/loadBalancers Microsoft.Authorization/roleDefinitions; do
+  assert_not_contains "does not declare $t" "$types" "$t"
+done
+assert_eq "AKS free control plane" "Free" "$(q '.[] | select(.type == "Microsoft.ContainerService/managedClusters") | .sku.tier')"
+assert_eq "AKS has exactly one pool" 1 "$(q '.[] | select(.type == "Microsoft.ContainerService/managedClusters") | .properties.agentPoolProfiles | length')"
+assert_eq "AKS single node" 1 "$(grep -c '^var nodeCount = 1$' modules/aks.bicep)"
+assert_eq "AKS no autoscaler" false "$(q '.[] | select(.type == "Microsoft.ContainerService/managedClusters") | .properties.agentPoolProfiles[0].enableAutoScaling')"
+assert_eq "AKS no add-ons (no monitoring)" null "$(q '.[] | select(.type == "Microsoft.ContainerService/managedClusters") | .properties.addonProfiles')"
+assert_eq "AKS app routing add-on" true "$(q '.[] | select(.type == "Microsoft.ContainerService/managedClusters") | .properties.ingressProfile.webAppRouting.enabled')"
+assert_eq "AKS local accounts disabled" true "$(q '.[] | select(.type == "Microsoft.ContainerService/managedClusters") | .properties.disableLocalAccounts')"
+assert_eq "AKS Azure RBAC" true "$(q '.[] | select(.type == "Microsoft.ContainerService/managedClusters") | .properties.aadProfile.enableAzureRBAC')"
+assert_eq "AKS node size is a parameter" "[parameters('nodeSize')]" "$(q '.[] | select(.type == "Microsoft.ContainerService/managedClusters") | .properties.agentPoolProfiles[0].vmSize')"
+assert_eq "registry is Basic" Basic "$(q '.[] | select(.type == "Microsoft.ContainerRegistry/registries") | .sku.name')"
+assert_eq "registry admin user off" false "$(q '.[] | select(.type == "Microsoft.ContainerRegistry/registries") | .properties.adminUserEnabled')"
+assert_eq "static web app is Free" Free "$(q '.[] | select(.type == "Microsoft.Web/staticSites") | .sku.name')"
+
+section "role assignments are narrow and covered by the seed's RBAC condition"
+assigned="$(grep -hoE "RoleId = '[0-9a-f-]{36}'" modules/*.bicep | grep -oE "[0-9a-f-]{36}" | sort -u)"
+[ -n "$assigned" ] && pass || fail "no role ids found in modules"
+for id in $assigned; do
+  case "$id" in
+    "$ROLE_ACR_PUSH" | "$ROLE_ACR_PULL" | "$ROLE_AKS_CLUSTER_USER" | "$ROLE_AKS_RBAC_WRITER" | "$ROLE_SWA_CONTRIBUTOR" | "$ROLE_DNS_ZONE_CONTRIBUTOR") pass ;;
+    *) fail "Bicep assigns role $id that the seed's RBAC condition does not allow" ;;
+  esac
+done
+assert_eq "no Owner/Contributor/RBAC admin assigned by Bicep" 0 \
+  "$(printf '%s\n' "$assigned" | grep -cE "$ROLE_CONTRIBUTOR|$ROLE_RBAC_ADMIN|8e3af657-a8ff-443c-a75c-2fe8c4bcb635" || true)"
+assert_eq "role assignments all target service principals" 0 \
+  "$(q '[.[] | select(.type == "Microsoft.Authorization/roleAssignments") | select(.properties.principalType != "ServicePrincipal")] | length')"
+assert_eq "role assignments are scoped to a resource" 0 \
+  "$(q '[.[] | select(.type == "Microsoft.Authorization/roleAssignments") | select((.scope // "") == "")] | length')"
+condition_ids="$(AZFLOW_SUBSCRIPTION_ID=s "$REPO_ROOT/bootstrap/seed.sh" --dry-run | grep 'azflow-infra-staging on .*rg-azflow-staging, limited')"
+for id in $assigned; do assert_contains "seed condition for stage rg allows $id" "$condition_ids" "$id"; done
+
+finish "bicep"
