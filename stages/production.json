@@ -1,0 +1,19 @@
+{
+  "stage": "production",
+  "subscriptionId": "$AZFLOW_SUBSCRIPTION_ID",
+  "location": "germanywestcentral",
+  "resourceGroup": "rg-azflow-prod",
+  "cluster": "aks-azflow-prod",
+  "registry": "acrazflowprod",
+  "staticWebApp": "swa-azflow-prod",
+  "staticWebAppLocation": "westeurope",
+  "nodeSize": "Standard_B2s",
+  "webHost": "app.demo.zzll.de",
+  "apiHost": "api.demo.zzll.de",
+  "shared": {
+    "subscriptionId": "$AZFLOW_SUBSCRIPTION_ID",
+    "resourceGroup": "rg-azflow-shared",
+    "location": "westeurope",
+    "dnsZone": "demo.zzll.de"
+  }
+}
