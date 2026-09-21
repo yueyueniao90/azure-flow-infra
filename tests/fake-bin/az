@@ -164,10 +164,11 @@ case "$cmd" in
     case "$sub3" in
       list)
         n="$(opt --name "$@")"
-        [ -f "$S/roledef.$n" ] && printf '%s\n' "$n"
+        [ -f "$S/roledef.$n" ] && jq -e --arg p "/subscriptions/$(opt --subscription "$@")/" 'any(.AssignableScopes[]; startswith($p))' "$S/roledef.$n" >/dev/null && printf '%s\n' "$n"
         ;;
       create | update)
         n="$(printf '%s' "$(opt --role-definition "$@")" | jq -r .Name)"
+        [ "$sub3" = update ] || [ ! -f "$S/roledef.$n" ] || fail "RoleDefinitionWithSameNameExists: role name '$n' is not unique in the tenant" 1
         printf '%s' "$(opt --role-definition "$@")" >"$S/roledef.$n"
         ;;
       *) fail "unsupported: $*" 99 ;;

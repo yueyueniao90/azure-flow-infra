@@ -318,7 +318,8 @@ ensure_role() {
 }
 
 # Custom role for PR previews: what-if needs an action the Reader role lacks. Read-only, no writes.
-ensure_whatif_role() { # <sub> <assignable scope>...
+# Role names are unique per tenant, so one definition is kept, assignable to every group in every subscription.
+ensure_whatif_role() { # <sub to hold the definition> <assignable scope>...
   local sub="$1" scopes existing def
   shift
   scopes="$(printf '%s\n' "$@" | jq -R . | jq -sc .)"
@@ -402,19 +403,23 @@ ensure_identity "$name"
 PREVIEW_APP="$ID_APP"
 preview_obj="$ID_OBJ"
 ensure_fedcred "$name" "$ID_APP" "github-pull-request" "repo:$INFRA_REPO:pull_request"
-for sub in $SUBS; do
-  scopes=""
-  for ((i = 0; i < n_stages; i++)); do
-    [ "${ST_SUB[$i]}" != "$sub" ] || scopes="$scopes $(rg_id "$sub" "${ST_RG[$i]}")"
-  done
-  [ "$SHARED_SUB" != "$sub" ] || scopes="$scopes $(rg_id "$SHARED_SUB" "$SHARED_RG")"
-  # shellcheck disable=SC2086  # scopes is a space-separated list of resource ids
-  ensure_whatif_role "$sub" $scopes
-  for scope in $scopes; do
-    ensure_role "$sub" "$scope" "$preview_obj" "Reader" "$name"
-    ensure_role "$sub" "$scope" "$preview_obj" "$WHATIF_ROLE" "$name"
-  done
+grant_preview() { # <sub> <group scope>
+  ensure_role "$1" "$2" "$preview_obj" "Reader" "$name"
+  ensure_role "$1" "$2" "$preview_obj" "$WHATIF_ROLE" "$name"
+}
+all_scopes=""
+for ((i = 0; i < n_stages; i++)); do
+  all_scopes="$all_scopes $(rg_id "${ST_SUB[$i]}" "${ST_RG[$i]}")"
 done
+all_scopes="$all_scopes $(rg_id "$SHARED_SUB" "$SHARED_RG")"
+first_sub="${SUBS# }"
+first_sub="${first_sub%% *}"
+# shellcheck disable=SC2086  # all_scopes is a space-separated list of resource ids
+ensure_whatif_role "$first_sub" $all_scopes
+for ((i = 0; i < n_stages; i++)); do
+  grant_preview "${ST_SUB[$i]}" "$(rg_id "${ST_SUB[$i]}" "${ST_RG[$i]}")"
+done
+grant_preview "$SHARED_SUB" "$(rg_id "$SHARED_SUB" "$SHARED_RG")"
 
 # ---- 6. GitHub variables ------------------------------------------------------------------------
 

@@ -221,6 +221,14 @@ assert_eq "exit code" 0 "$RC"
 assert_file_contains "shared group in shared subscription" "$FAKE_AZ_STATE/calls.log" "group create --name rg-azflow-shared --location westeurope --subscription sub-shared"
 assert_file_contains "shared scope uses the shared subscription" "$FAKE_AZ_STATE/roles.jsonl" '"scope":"/subscriptions/sub-shared/resourceGroups/rg-azflow-shared"'
 assert_not_contains "no role on the shared group in the stage subscription" "$(cat "$FAKE_AZ_STATE/roles.jsonl")" '/subscriptions/sub-test/resourceGroups/rg-azflow-shared'
+assert_count "what-if role is defined once for the tenant" 1 "$FAKE_AZ_STATE/calls.log" "role definition create"
+assert_eq "what-if role is assignable in both subscriptions" "sub-shared sub-test" \
+  "$(jq -r '[.AssignableScopes[] | split("/")[2]] | unique | join(" ")' "$FAKE_AZ_STATE/roledef.azflow-deployment-whatif")"
+assert_eq "preview what-if on the shared group" 1 \
+  "$(jq -s '[.[] | select(.principalId == "obj-azflow-infra-preview" and .roleDefinitionName == "azflow-deployment-whatif" and .scope == "/subscriptions/sub-shared/resourceGroups/rg-azflow-shared")] | length' "$FAKE_AZ_STATE/roles.jsonl")"
+AZFLOW_STAGES_DIR="$tmp" AZFLOW_SHARED_SUBSCRIPTION_ID="sub-shared" run_seed
+assert_eq "second run exit code" 0 "$RC"
+assert_count "second run does not create the what-if role again" 1 "$FAKE_AZ_STATE/calls.log" "role definition create"
 rm -rf "$tmp"
 
 section "stage files that disagree on the shared subscription"
