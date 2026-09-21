@@ -148,6 +148,13 @@ job receives the `environment:production` token.
 The web and api repos are private and have no environment protection on the free plan, so their credentials are
 tied to the `main` branch instead.
 
+**Known exception: staging can change production DNS.** Both stages share one DNS zone (`demo.zzll.de`), by design.
+The staging infra identity (its `environment:staging` token is not protected by a required reviewer) has Contributor on
+the shared group, and the staging api identity (a `main` branch push of a private repo without environment protection)
+has DNS Zone Contributor on the whole zone. Either can therefore create, change or delete the production records
+`app.demo.zzll.de` and `api.demo.zzll.de`, so a staging pipeline can bypass the production approval for DNS. This
+was accepted for the demo; narrowing it would take record-set-scoped grants or one zone per stage.
+
 ### GitHub repository variables written by the seed
 
 Identifiers only, no secrets. `<S>` is `STAGING` or `PRODUCTION`.
