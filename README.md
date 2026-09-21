@@ -81,7 +81,7 @@ It needs `AZFLOW_SUBSCRIPTION_ID` set (a dry run shows a placeholder instead).
 carries its own reference so the code already treats every stage as if it could live in its own subscription: to
 split them later, point production at another variable (for example `"$AZFLOW_PROD_SUBSCRIPTION_ID"`), set it, and
 run the seed again. The `.bicepparam` files read the shared group's subscription from the variable that the stage file's
-`shared.subscriptionId` names; both stage files must resolve it to the same value (the seed and preflight check this).
+`shared.subscriptionId` names; both stage files must resolve it to the same value (preflight and the seed check this).
 The deployment itself targets whichever subscription the pipeline (or `az --subscription`) selects.
 
 `location` is a per-stage setting on purpose: the free trial allows 4 vCPU per region, so one 2-vCPU node per

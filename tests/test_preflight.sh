@@ -135,4 +135,16 @@ run_preflight
 assert_eq "unset subscription exit code" 2 "$RC"
 assert_contains "subscription hint" "$OUT" "AZFLOW_SUBSCRIPTION_ID"
 
+section "stage files that disagree on the shared subscription"
+new_state
+tmp="$(mktemp -d)"
+cp "$REPO_ROOT"/stages/*.json "$tmp/"
+jq '.shared.subscriptionId = "$AZFLOW_SHARED_SUBSCRIPTION_ID"' "$tmp/production.json" >"$tmp/x.json" && mv "$tmp/x.json" "$tmp/production.json"
+AZFLOW_SUBSCRIPTION_ID="sub-test" AZFLOW_SHARED_SUBSCRIPTION_ID="sub-shared" AZFLOW_STAGES_DIR="$tmp" run_preflight
+assert_eq "exit code" 2 "$RC"
+assert_contains "names the key" "$OUT" "shared.subscriptionId"
+AZFLOW_SUBSCRIPTION_ID="sub-test" AZFLOW_SHARED_SUBSCRIPTION_ID="sub-test" AZFLOW_STAGES_DIR="$tmp" run_preflight
+assert_not_contains "agreeing references pass the check" "$OUT" "shared.subscriptionId"
+rm -rf "$tmp"
+
 finish "preflight"

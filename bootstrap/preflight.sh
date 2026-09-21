@@ -100,6 +100,10 @@ for st in $STAGES; do
   S_SWA+=("$(stage_get "$st" .staticWebApp)")
 done
 [ "$problems" -eq 0 ] || die "stage file problems above"
+if ! out="$(validate_distinct)"; then
+  printf '%s\n' "$out" >&2
+  die "stage file problems above"
+fi
 n_stages=${#S_NAME[@]}
 
 az account show >/dev/null 2>&1 || die "not signed in to Azure. Run: az login"
