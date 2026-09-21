@@ -22,7 +22,7 @@ tests/             offline test suite: tests/run.sh
 | [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) (`az`) | preflight and seed |
 | [GitHub CLI](https://cli.github.com/) (`gh`), authenticated | seed writes repository variables (optional: otherwise it prints them) |
 | `jq` | preflight, seed, tests |
-| `shellcheck`, [`bicep`](https://aka.ms/bicep-install) | tests only |
+| `shellcheck`, and the Bicep CLI: either standalone [`bicep`](https://aka.ms/bicep-install) or `az bicep` (`az bicep install`) | tests only |
 
 You need to be able to create app registrations in your Entra tenant and to assign roles on the subscription
 (Owner of the subscription is enough). The scripts also run on the macOS default bash (3.2).
@@ -229,6 +229,11 @@ cost and security invariants of the compiled template (free tiers, one node, no 
 assignments limited to what the seed's RBAC condition allows), and runs the preflight and the seed against a fake
 `az` and `gh` on `PATH`: dry run, first run, idempotent second run, least-privilege scopes, retries, separate
 subscriptions per stage. Nothing talks to Azure; the tests never touch a real login.
+
+The Bicep suite uses the standalone `bicep` CLI when it is on `PATH` and otherwise falls back to `az bicep`
+(called as `az bicep <build|build-params|lint> --file <file>`). That fallback only compiles local files; it never
+signs in or touches a subscription. Without either tool the suite fails with install instructions, unless you set
+`AZFLOW_SKIP_BICEP=1`.
 
 ## Known limits and follow-ups
 

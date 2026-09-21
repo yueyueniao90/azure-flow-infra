@@ -8,10 +8,20 @@ set -euo pipefail
 # shellcheck source=bootstrap/lib.sh
 . "$REPO_ROOT/bootstrap/lib.sh"
 
+# bicep_cli <build|build-params|lint> <file> [extra flags, e.g. --stdout]
+# The standalone CLI takes the file positionally; `az bicep` requires --file.
 if command -v bicep >/dev/null 2>&1; then
-  bicep_cli() { bicep "$@"; }
+  bicep_cli() {
+    local cmd="$1" file="$2"
+    shift 2
+    bicep "$cmd" "$file" "$@"
+  }
 elif command -v az >/dev/null 2>&1 && az bicep version >/dev/null 2>&1; then
-  bicep_cli() { az bicep "$@"; }
+  bicep_cli() {
+    local cmd="$1" file="$2"
+    shift 2
+    az bicep "$cmd" --file "$file" "$@"
+  }
 else
   if [ "${AZFLOW_SKIP_BICEP:-0}" = 1 ]; then
     echo "SKIPPED: bicep not available (AZFLOW_SKIP_BICEP=1)"
