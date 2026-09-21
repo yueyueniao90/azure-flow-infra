@@ -107,7 +107,7 @@ contributor_scopes="$(printf '%s' "$template" | jq -r --arg id "$ROLE_CONTRIBUTO
       | select(.properties.roleDefinitionId as $r | ($r | contains($id)) or ($refs | any(. as $x | $r | contains($x))))
       | .scope] | .[]')"
 assert_eq "Contributor is assigned exactly once" 1 "$(printf '%s\n' "$contributor_scopes" | grep -c .)"
-assert_contains "Contributor is scoped to the Static Web App resource" "$contributor_scopes" "Microsoft.Web/staticSites/"
+assert_contains "Contributor is scoped to the Static Web App resource" "$contributor_scopes" "Microsoft.Web/staticSites'"
 assert_eq "role assignments all target service principals" 0 \
   "$(q '[.[] | select(.type == "Microsoft.Authorization/roleAssignments") | select(.properties.principalType != "ServicePrincipal")] | length')"
 assert_eq "role assignments are scoped to a resource" 0 \
