@@ -106,10 +106,10 @@ assert_eq "what-if role has no write actions" 0 "$(jq '[.Actions[] | select(test
 
 section "RBAC Administrator is conditioned to the roles Bicep assigns"
 cond="$(jq -s -r '[.[] | select(.principalId == "obj-azflow-infra-staging" and .roleDefinitionName == "Role Based Access Control Administrator" and .scope == "'"$S"'/rg-azflow-staging")][0].condition' "$roles")"
-for id in "$ROLE_ACR_PUSH" "$ROLE_ACR_PULL" "$ROLE_AKS_CLUSTER_USER" "$ROLE_AKS_RBAC_WRITER" "$ROLE_SWA_CONTRIBUTOR" "$ROLE_DNS_ZONE_CONTRIBUTOR"; do
+for id in "$ROLE_ACR_PUSH" "$ROLE_ACR_PULL" "$ROLE_AKS_CLUSTER_USER" "$ROLE_AKS_RBAC_WRITER" "$ROLE_CONTRIBUTOR" "$ROLE_DNS_ZONE_CONTRIBUTOR"; do
   assert_contains "condition allows $id" "$cond" "$id"
 done
-for id in "$ROLE_CONTRIBUTOR" "$ROLE_RBAC_ADMIN" "b24988ac" "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9"; do
+for id in "$ROLE_RBAC_ADMIN" "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9" "8e3af657-a8ff-443c-a75c-2fe8c4bcb635"; do
   assert_not_contains "condition does not allow $id" "$cond" "$id"
 done
 assert_contains "condition guards writes" "$cond" "roleAssignments/write"
@@ -117,6 +117,7 @@ assert_contains "condition guards deletes" "$cond" "roleAssignments/delete"
 shared_cond="$(jq -s -r '[.[] | select(.principalId == "obj-azflow-infra-staging" and .roleDefinitionName == "Role Based Access Control Administrator" and .scope == "'"$S"'/rg-azflow-shared")][0].condition' "$roles")"
 assert_contains "shared rg allows DNS Zone Contributor" "$shared_cond" "$ROLE_DNS_ZONE_CONTRIBUTOR"
 assert_not_contains "shared rg does not allow AcrPush" "$shared_cond" "$ROLE_ACR_PUSH"
+assert_not_contains "shared rg does not allow Contributor" "$shared_cond" "$ROLE_CONTRIBUTOR"
 
 section "GitHub variables"
 vars="$FAKE_AZ_STATE/gh-vars.log"

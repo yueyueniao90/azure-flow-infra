@@ -120,7 +120,7 @@ variables). Empty means the corresponding role assignments are skipped.
 | `registry.bicep` | Container Registry, Basic tier, admin user off | AcrPush for the api identity |
 | `aks.bicep` | AKS, free control plane, one node, no autoscaler, no add-ons except managed application routing (ingress), Entra-only access | Cluster User Role and RBAC Writer for the api identity |
 | `registry-pull.bicep` | | AcrPull for the cluster's kubelet identity on the stage registry |
-| `static-web-app.bicep` | Static Web App, Free plan | Static Web App Contributor for the web identity |
+| `static-web-app.bicep` | Static Web App, Free plan | Contributor on the Static Web App resource only, for the web identity |
 | `dns-zone.bicep` | Azure DNS zone in the shared group (both stages declare it identically) | DNS Zone Contributor for the api identity (it writes its own A record) |
 
 The cluster has local accounts disabled and uses Azure RBAC for Kubernetes, so there is no static kubeconfig to leak.
@@ -130,8 +130,8 @@ To use `kubectl` yourself, give your user a role such as *Azure Kubernetes Servi
 
 | Identity (Entra app) | Token subject | Rights |
 | --- | --- | --- |
-| `azflow-infra-<stage>` | infra repo, environment `<stage>` | On its own stage group: Contributor, plus Role Based Access Control Administrator **limited by an ABAC condition** to assigning and removing only AcrPush, AcrPull, AKS Cluster User, AKS RBAC Writer, Static Web App Contributor and DNS Zone Contributor. On the shared group (only the DNS zone lives there): Contributor, plus RBAC Administrator limited to DNS Zone Contributor. |
-| `azflow-web-<stage>` | `azure-flow-web`, branch `main` | Reader on its own stage group; Static Web App Contributor on its Static Web App (from Bicep) |
+| `azflow-infra-<stage>` | infra repo, environment `<stage>` | On its own stage group: Contributor, plus Role Based Access Control Administrator **limited by an ABAC condition** to assigning and removing only AcrPush, AcrPull, AKS Cluster User, AKS RBAC Writer, Contributor and DNS Zone Contributor. On the shared group (only the DNS zone lives there): Contributor, plus RBAC Administrator limited to DNS Zone Contributor. |
+| `azflow-web-<stage>` | `azure-flow-web`, branch `main` | Reader on its own stage group; Contributor on its own Static Web App resource only (from Bicep) |
 | `azflow-api-<stage>` | `azure-flow-api`, branch `main` | Reader on its own stage group; AcrPush, AKS Cluster User and RBAC Writer, DNS Zone Contributor on single resources (from Bicep) |
 | `azflow-infra-preview` | infra repo, `pull_request` | Reader plus the custom role `azflow-deployment-whatif` (only `deployments/whatIf/action` and deployment reads) on the stage groups and the shared group |
 
@@ -140,6 +140,10 @@ and role assignments. Contributor on one resource group covers the writes but ca
 conditioned RBAC Administrator adds exactly the grants Bicep makes and nothing else, so a hijacked pipeline cannot
 hand itself Owner. A hand-written custom role could be narrower than Contributor, but it needs one entry per
 resource-provider action and can only be verified against a real deployment; it is listed under follow-ups.
+The web identity gets the built-in Contributor role, but only on its own Static Web App resource (no Static Web Apps
+role ID could be verified offline). Because Bicep assigns it, Contributor is in the stage-group ABAC condition: an
+infra identity can hand Contributor to another principal within its own stage group, which is no more than it already
+holds there. The shared group's condition still allows DNS Zone Contributor only.
 Nothing is assigned at subscription scope, nobody is Owner, and there are no secrets: tokens are minted per run
 for a specific repository and branch or environment. Fork pull requests get no OIDC token. The production infra
 environment is protected by a required reviewer (configured with the pipeline in step 2), and only an approved

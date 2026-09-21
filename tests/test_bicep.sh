@@ -94,12 +94,20 @@ assigned="$(grep -hoE "RoleId = '[0-9a-f-]{36}'" modules/*.bicep | grep -oE "[0-
 [ -n "$assigned" ] && pass || fail "no role ids found in modules"
 for id in $assigned; do
   case "$id" in
-    "$ROLE_ACR_PUSH" | "$ROLE_ACR_PULL" | "$ROLE_AKS_CLUSTER_USER" | "$ROLE_AKS_RBAC_WRITER" | "$ROLE_SWA_CONTRIBUTOR" | "$ROLE_DNS_ZONE_CONTRIBUTOR") pass ;;
+    "$ROLE_ACR_PUSH" | "$ROLE_ACR_PULL" | "$ROLE_AKS_CLUSTER_USER" | "$ROLE_AKS_RBAC_WRITER" | "$ROLE_CONTRIBUTOR" | "$ROLE_DNS_ZONE_CONTRIBUTOR") pass ;;
     *) fail "Bicep assigns role $id that the seed's RBAC condition does not allow" ;;
   esac
 done
-assert_eq "no Owner/Contributor/RBAC admin assigned by Bicep" 0 \
-  "$(printf '%s\n' "$assigned" | grep -cE "$ROLE_CONTRIBUTOR|$ROLE_RBAC_ADMIN|8e3af657-a8ff-443c-a75c-2fe8c4bcb635" || true)"
+assert_eq "no Owner/RBAC admin assigned by Bicep" 0 \
+  "$(printf '%s\n' "$assigned" | grep -cE "$ROLE_RBAC_ADMIN|8e3af657-a8ff-443c-a75c-2fe8c4bcb635" || true)"
+contributor_scopes="$(printf '%s' "$template" | jq -r --arg id "$ROLE_CONTRIBUTOR" '
+  ([.. | objects | select(has("variables")) | .variables | select(type == "object")] | add // {}) as $vars
+  | [$vars | to_entries[] | select(.value == $id) | "variables('"'"'" + .key + "'"'"')"] as $refs
+  | [.. | objects | select(.type? == "Microsoft.Authorization/roleAssignments")
+      | select(.properties.roleDefinitionId as $r | ($r | contains($id)) or ($refs | any(. as $x | $r | contains($x))))
+      | .scope] | .[]')"
+assert_eq "Contributor is assigned exactly once" 1 "$(printf '%s\n' "$contributor_scopes" | grep -c .)"
+assert_contains "Contributor is scoped to the Static Web App resource" "$contributor_scopes" "Microsoft.Web/staticSites/"
 assert_eq "role assignments all target service principals" 0 \
   "$(q '[.[] | select(.type == "Microsoft.Authorization/roleAssignments") | select(.properties.principalType != "ServicePrincipal")] | length')"
 assert_eq "role assignments are scoped to a resource" 0 \

@@ -8,7 +8,7 @@ param location string
 @description('Object ID of the identity that deploys site content. Empty skips the assignment.')
 param deployPrincipalId string = ''
 
-var staticWebAppContributorRoleId = 'de139f84-1756-47ae-9be6-808fbbe84772'
+var contributorRoleId = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
 
 resource site 'Microsoft.Web/staticSites@2023-12-01' = {
   name: name
@@ -26,9 +26,9 @@ resource site 'Microsoft.Web/staticSites@2023-12-01' = {
 
 resource deployer 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!empty(deployPrincipalId)) {
   scope: site
-  name: guid(site.id, deployPrincipalId, staticWebAppContributorRoleId)
+  name: guid(site.id, deployPrincipalId, contributorRoleId)
   properties: {
-    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', staticWebAppContributorRoleId)
+    roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', contributorRoleId)
     principalId: deployPrincipalId
     principalType: 'ServicePrincipal'
   }

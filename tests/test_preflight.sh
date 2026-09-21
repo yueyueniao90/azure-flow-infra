@@ -145,6 +145,12 @@ assert_eq "exit code" 2 "$RC"
 assert_contains "names the key" "$OUT" "shared.subscriptionId"
 AZFLOW_SUBSCRIPTION_ID="sub-test" AZFLOW_SHARED_SUBSCRIPTION_ID="sub-test" AZFLOW_STAGES_DIR="$tmp" run_preflight
 assert_not_contains "agreeing references pass the check" "$OUT" "shared.subscriptionId"
+jq '.shared.subscriptionId = "$AZFLOW_SHARED_SUBSCRIPTION_ID"' "$tmp/staging.json" >"$tmp/x.json" && mv "$tmp/x.json" "$tmp/staging.json"
+: >"$FAKE_AZ_STATE/calls.log"
+AZFLOW_SUBSCRIPTION_ID="sub-test" AZFLOW_SHARED_SUBSCRIPTION_ID="sub-shared" AZFLOW_STAGES_DIR="$tmp" run_preflight
+assert_not_contains "agreeing split subscription passes the check" "$OUT" "shared.subscriptionId"
+assert_eq "providers are checked in the shared subscription" "$(printf '%s\n' $REQUIRED_PROVIDERS | wc -l | tr -d ' ')" \
+  "$(grep -c '^provider show .*--subscription sub-shared' "$FAKE_AZ_STATE/calls.log")"
 rm -rf "$tmp"
 
 finish "preflight"

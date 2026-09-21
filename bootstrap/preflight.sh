@@ -76,6 +76,7 @@ row() { # <PASS|FAIL|UNKNOWN|WARN> <label> <detail>
 
 S_NAME=()
 S_SUB=()
+S_SHARED_SUB=()
 S_LOC=()
 S_SIZE=()
 S_RG=()
@@ -91,8 +92,12 @@ for st in $STAGES; do
   if ! sub="$(resolve_ref "$(stage_get "$st" .subscriptionId)")"; then
     die "stage '$st': subscriptionId is $(stage_get "$st" .subscriptionId) but that environment variable is not set. Try: export AZFLOW_SUBSCRIPTION_ID=\"\$(az account show --query id -o tsv)\""
   fi
+  if ! shared_sub="$(resolve_ref "$(stage_get "$st" .shared.subscriptionId)")"; then
+    die "stage '$st': shared.subscriptionId is $(stage_get "$st" .shared.subscriptionId) but that environment variable is not set. Try: export AZFLOW_SUBSCRIPTION_ID=\"\$(az account show --query id -o tsv)\""
+  fi
   S_NAME+=("$st")
   S_SUB+=("$sub")
+  S_SHARED_SUB+=("$shared_sub")
   S_LOC+=("$(stage_get "$st" .location)")
   S_SIZE+=("$(stage_get "$st" .nodeSize)")
   S_RG+=("$(stage_get "$st" .resourceGroup)")
@@ -110,7 +115,9 @@ az account show >/dev/null 2>&1 || die "not signed in to Azure. Run: az login"
 
 SUBS=""
 for ((i = 0; i < n_stages; i++)); do
-  case " $SUBS " in *" ${S_SUB[$i]} "*) ;; *) SUBS="$SUBS ${S_SUB[$i]}" ;; esac
+  for s in "${S_SUB[$i]}" "${S_SHARED_SUB[$i]}"; do
+    case " $SUBS " in *" $s "*) ;; *) SUBS="$SUBS $s" ;; esac
+  done
 done
 
 # ---- 1. resource providers ----------------------------------------------------------------------

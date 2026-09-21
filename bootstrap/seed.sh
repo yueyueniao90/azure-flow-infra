@@ -272,7 +272,7 @@ rbac_condition() { # <role id>...
 }
 
 stage_rbac_condition() {
-  rbac_condition "$ROLE_ACR_PUSH" "$ROLE_ACR_PULL" "$ROLE_AKS_CLUSTER_USER" "$ROLE_AKS_RBAC_WRITER" "$ROLE_SWA_CONTRIBUTOR" "$ROLE_DNS_ZONE_CONTRIBUTOR"
+  rbac_condition "$ROLE_ACR_PUSH" "$ROLE_ACR_PULL" "$ROLE_AKS_CLUSTER_USER" "$ROLE_AKS_RBAC_WRITER" "$ROLE_CONTRIBUTOR" "$ROLE_DNS_ZONE_CONTRIBUTOR"
 }
 
 squash() { tr -d ' \n\t'; }
