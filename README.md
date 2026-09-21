@@ -240,4 +240,4 @@ subscriptions per stage. Nothing talks to Azure; the tests never touch a real lo
 - `RBAC Writer` cannot create Kubernetes namespaces; the api deploys into an existing namespace (for example `default`).
 - DNS Zone Contributor for the api identity is zone-wide; it could be narrowed to record-set scope once the records exist.
 - A custom role for the infra identities could replace Contributor with an exact action list.
-- A production stage in its own subscription needs the seed run once more; cross-subscription paths are untested.
+- A production stage in its own subscription needs the seed run once more; cross-subscription paths are only exercised against the fake `az`, not a real second subscription.
