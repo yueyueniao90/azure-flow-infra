@@ -14,7 +14,8 @@
 #   3. creates Entra app registrations + service principals: infra, web, api for each stage (six) and
 #      one read-only infra identity for pull-request previews
 #   4. adds federated credentials (OIDC); no secrets or passwords are ever created
-#   5. assigns each identity rights on ITS OWN stage's resource group only (see README, "Access model")
+#   5. assigns each identity its rights on its own stage's resource group, plus the shared group for the
+#      infra and preview identities (see README, "Access model")
 #   6. writes client / tenant / subscription / principal IDs to GitHub repo variables with gh when
 #      authenticated, otherwise prints them
 
