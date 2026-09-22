@@ -13,7 +13,9 @@
 #   2. creates the stage resource groups and the shared resource group (DNS zone lives there)
 #   3. creates Entra app registrations + service principals: infra, web, api for each stage (six) and
 #      one read-only infra identity for pull-request previews
-#   4. adds federated credentials (OIDC); no secrets or passwords are ever created
+#   4. adds federated credentials (OIDC); no secrets or passwords are ever created. Each subject starts with the
+#      prefix GitHub reports for that repository (gh api .../actions/oidc/customization/sub), so a real run needs
+#      gh signed in, even with --no-gh
 #   5. assigns each identity its rights on its own stage's resource group, plus the shared group for the
 #      infra and preview identities (see README, "Access model")
 #   6. writes client / tenant / subscription / principal IDs to GitHub repo variables with gh when
@@ -47,6 +49,7 @@ done
 require_cmd jq "Install jq (brew install jq)."
 if [ "$DRY" -eq 0 ]; then
   require_cmd az "Install the Azure CLI: https://learn.microsoft.com/cli/azure/install-azure-cli"
+  require_cmd gh "Install the GitHub CLI (https://cli.github.com/); seed.sh reads each repository's OIDC subject prefix with it."
 fi
 
 RETRY_SLEEP="${AZFLOW_RETRY_SLEEP:-10}"
@@ -172,6 +175,36 @@ if [ "$DRY" -eq 0 ]; then
     fi
   done
 fi
+
+# ---- OIDC subject prefixes ----------------------------------------------------------------------
+
+# oidc_sub_prefix <owner/repo>: the subject prefix GitHub puts on that repository's OIDC tokens, without the
+# :environment:/:ref:/:pull_request suffix. With immutable subjects on it is repo:<owner>@<owner id>/<repo>@<repo id>,
+# otherwise repo:<owner>/<repo>; asked every run, never guessed, since a wrong guess only shows up as AADSTS700213
+# at the pipeline's Azure login. A dry run needs no sign-in, so it shows a placeholder.
+oidc_sub_prefix() {
+  local p
+  if [ "$DRY" -eq 1 ]; then
+    printf '<oidc-sub-prefix of %s>' "$1"
+    return 0
+  fi
+  p="$(gh api "repos/$1/actions/oidc/customization/sub" --jq .sub_claim_prefix 2>"$WORK/gh-stderr")" || {
+    cat "$WORK/gh-stderr" >&2
+    die "could not read the OIDC subject prefix (sub_claim_prefix) of $1 from GitHub; every federated credential subject is built from it. Is gh signed in (gh auth login) with read access to $1?"
+  }
+  [[ "$p" =~ ^repo:[^:/]+/[^:/]+$ ]] ||
+    die "GitHub returned an unexpected OIDC subject prefix (sub_claim_prefix) for $1: '$p' (expected repo:<owner>/<repo> or repo:<owner>@<id>/<repo>@<id>)"
+  printf '%s' "$p"
+}
+
+log "OIDC subject prefixes (from GitHub)"
+INFRA_SUB_PREFIX="$(oidc_sub_prefix "$INFRA_REPO")" || exit 2
+WEB_SUB_PREFIX="$(oidc_sub_prefix "$WEB_REPO")" || exit 2
+API_SUB_PREFIX="$(oidc_sub_prefix "$API_REPO")" || exit 2
+log "  $INFRA_REPO: $INFRA_SUB_PREFIX"
+log "  $WEB_REPO: $WEB_SUB_PREFIX"
+log "  $API_REPO: $API_SUB_PREFIX"
+log
 
 # ---- 1. providers -------------------------------------------------------------------------------
 
@@ -382,7 +415,7 @@ for st in $ALL_STAGES; do
   ensure_identity "$name"
   INFRA_APP+=("$ID_APP")
   infra_obj="$ID_OBJ"
-  ensure_fedcred "$name" "$ID_APP" "github-environment-$st" "repo:$INFRA_REPO:environment:$st"
+  ensure_fedcred "$name" "$ID_APP" "github-environment-$st" "$INFRA_SUB_PREFIX:environment:$st"
   ensure_role "$sub" "$rg_scope" "$infra_obj" "Contributor" "$name"
   ensure_role "$sub" "$rg_scope" "$infra_obj" "Role Based Access Control Administrator" "$name" "$(stage_rbac_condition)"
   # The shared group holds only the DNS zone. Contributor there lets the stage deployment create the
@@ -398,13 +431,13 @@ for st in $ALL_STAGES; do
     if [ "$kind" = web ]; then
       WEB_APP+=("$ID_APP")
       WEB_OBJ+=("$ID_OBJ")
-      repo="$WEB_REPO"
+      prefix="$WEB_SUB_PREFIX"
     else
       API_APP+=("$ID_APP")
       API_OBJ+=("$ID_OBJ")
-      repo="$API_REPO"
+      prefix="$API_SUB_PREFIX"
     fi
-    ensure_fedcred "$name" "$ID_APP" "github-main" "repo:$repo:ref:refs/heads/main"
+    ensure_fedcred "$name" "$ID_APP" "github-main" "$prefix:ref:refs/heads/main"
     ensure_role "$sub" "$rg_scope" "$ID_OBJ" "Reader" "$name"
   done
   i=$((i + 1))
@@ -417,7 +450,7 @@ name="$(identity_name infra preview)"
 ensure_identity "$name"
 PREVIEW_APP="$ID_APP"
 preview_obj="$ID_OBJ"
-ensure_fedcred "$name" "$ID_APP" "github-pull-request" "repo:$INFRA_REPO:pull_request"
+ensure_fedcred "$name" "$ID_APP" "github-pull-request" "$INFRA_SUB_PREFIX:pull_request"
 grant_preview() { # <sub> <group scope>
   ensure_role "$1" "$2" "$preview_obj" "Reader" "$name"
   ensure_role "$1" "$2" "$preview_obj" "$WHATIF_ROLE" "$name"

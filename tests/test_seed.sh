@@ -28,8 +28,9 @@ assert_eq "exit code" 0 "$RC"
 for want in "resource provider Microsoft.Compute" "resource group rg-azflow-staging" "resource group rg-azflow-prod" \
   "resource group rg-azflow-shared" "azflow-infra-staging" "azflow-infra-production" "azflow-web-staging" "azflow-web-production" \
   "azflow-api-staging" "azflow-api-production" "azflow-infra-preview" \
-  "environment:staging" "environment:production" "repo:yueyueniao90/azure-flow-infra:pull_request" \
-  "repo:yueyueniao90/azure-flow-web:ref:refs/heads/main" "repo:yueyueniao90/azure-flow-api:ref:refs/heads/main" \
+  "<oidc-sub-prefix of yueyueniao90/azure-flow-infra>:environment:staging" "environment:production" \
+  "<oidc-sub-prefix of yueyueniao90/azure-flow-infra>:pull_request" \
+  "<oidc-sub-prefix of yueyueniao90/azure-flow-web>:ref:refs/heads/main" "<oidc-sub-prefix of yueyueniao90/azure-flow-api>:ref:refs/heads/main" \
   "Role Based Access Control Administrator" "azflow-deployment-whatif" "AZFLOW_STAGING_CLIENT_ID"; do
   assert_contains "dry run mentions $want" "$OUT" "$want"
 done
@@ -70,6 +71,9 @@ assert_eq "preview subject" "repo:yueyueniao90/azure-flow-infra:pull_request" "$
 for st in staging production; do
   assert_eq "web $st subject" "repo:yueyueniao90/azure-flow-web:ref:refs/heads/main" "$(cat "$FAKE_AZ_STATE/fedcred.app-azflow-web-$st.github-main")"
   assert_eq "api $st subject" "repo:yueyueniao90/azure-flow-api:ref:refs/heads/main" "$(cat "$FAKE_AZ_STATE/fedcred.app-azflow-api-$st.github-main")"
+done
+for repo in azure-flow-infra azure-flow-web azure-flow-api; do
+  assert_count "OIDC subject prefix of $repo read once" 1 "$FAKE_AZ_STATE/gh-calls.log" "api repos/yueyueniao90/$repo/actions/oidc/customization/sub"
 done
 
 section "no secrets, no passwords, no long-lived credentials"
@@ -165,6 +169,67 @@ run_seed
 assert_eq "subject fixed" "repo:yueyueniao90/azure-flow-api:ref:refs/heads/main" "$(cat "$FAKE_AZ_STATE/fedcred.app-azflow-api-staging.github-main")"
 assert_contains "reports the update" "$OUT" "updated federated credential github-main"
 
+# oidc_sub_reply <repo> <sub_claim_prefix>: what GitHub answers for a repository with immutable subjects on.
+# The numeric IDs in these tests are made up.
+oidc_sub_reply() {
+  jq -cn --arg p "$2" '{use_default: true, use_immutable_subject: true, sub_claim_prefix: $p}' \
+    >"$FAKE_AZ_STATE/gh-oidc-sub.yueyueniao90_$1.json"
+}
+immutable_subjects() {
+  oidc_sub_reply azure-flow-infra "repo:yueyueniao90@1000/azure-flow-infra@2001"
+  oidc_sub_reply azure-flow-web "repo:yueyueniao90@1000/azure-flow-web@2002"
+  oidc_sub_reply azure-flow-api "repo:yueyueniao90@1000/azure-flow-api@2003"
+}
+assert_immutable_subjects() {
+  assert_eq "infra staging subject" "repo:yueyueniao90@1000/azure-flow-infra@2001:environment:staging" "$(cat "$FAKE_AZ_STATE/fedcred.app-azflow-infra-staging.github-environment-staging")"
+  assert_eq "infra production subject" "repo:yueyueniao90@1000/azure-flow-infra@2001:environment:production" "$(cat "$FAKE_AZ_STATE/fedcred.app-azflow-infra-production.github-environment-production")"
+  assert_eq "preview subject" "repo:yueyueniao90@1000/azure-flow-infra@2001:pull_request" "$(cat "$FAKE_AZ_STATE/fedcred.app-azflow-infra-preview.github-pull-request")"
+  for st in staging production; do
+    assert_eq "web $st subject" "repo:yueyueniao90@1000/azure-flow-web@2002:ref:refs/heads/main" "$(cat "$FAKE_AZ_STATE/fedcred.app-azflow-web-$st.github-main")"
+    assert_eq "api $st subject" "repo:yueyueniao90@1000/azure-flow-api@2003:ref:refs/heads/main" "$(cat "$FAKE_AZ_STATE/fedcred.app-azflow-api-$st.github-main")"
+  done
+}
+
+section "immutable OIDC subjects: every subject uses the prefix GitHub reports"
+new_state
+immutable_subjects
+run_seed
+assert_eq "exit code" 0 "$RC"
+assert_immutable_subjects
+assert_contains "shows the prefix it uses" "$OUT" "yueyueniao90/azure-flow-infra: repo:yueyueniao90@1000/azure-flow-infra@2001"
+assert_count "infra prefix read once for all its credentials" 1 "$FAKE_AZ_STATE/gh-calls.log" "api repos/yueyueniao90/azure-flow-infra/actions/oidc/customization/sub"
+
+section "re-run after immutable subjects were turned on repairs the credentials in place"
+new_state
+run_seed
+assert_eq "first run (plain subjects) exit code" 0 "$RC"
+immutable_subjects
+: >"$FAKE_AZ_STATE/calls.log"
+run_seed
+assert_eq "exit code" 0 "$RC"
+assert_immutable_subjects
+assert_count "all seven credentials updated" 7 "$FAKE_AZ_STATE/calls.log" "federated-credential update"
+assert_count "none created twice" 0 "$FAKE_AZ_STATE/calls.log" "federated-credential create"
+: >"$FAKE_AZ_STATE/calls.log"
+run_seed
+assert_count "third run: nothing left to update" 0 "$FAKE_AZ_STATE/calls.log" "federated-credential update"
+
+section "no OIDC subject prefix from GitHub: fails before touching Azure, never guesses"
+new_state
+: >"$FAKE_AZ_STATE/gh-not-authenticated"
+run_seed
+assert_eq "gh signed out: exit code" 2 "$RC"
+assert_contains "names the missing prefix" "$OUT" "OIDC subject prefix (sub_claim_prefix) of yueyueniao90/azure-flow-infra"
+assert_contains "login hint" "$OUT" "gh auth login"
+assert_count "no provider or group changes" 0 "$FAKE_AZ_STATE/calls.log" "create"
+assert_count "no federated credential" 0 "$FAKE_AZ_STATE/calls.log" "federated-credential"
+new_state
+printf '{"use_default":true,"use_immutable_subject":true}' >"$FAKE_AZ_STATE/gh-oidc-sub.yueyueniao90_azure-flow-api.json"
+run_seed
+assert_eq "prefix missing from the reply: exit code" 2 "$RC"
+assert_contains "names the repository and the value" "$OUT" "unexpected OIDC subject prefix (sub_claim_prefix) for yueyueniao90/azure-flow-api: 'null'"
+assert_count "no federated credential" 0 "$FAKE_AZ_STATE/calls.log" "federated-credential"
+
 section "role assignment retries while Entra catches up"
 new_state
 echo 3 >"$FAKE_AZ_STATE/role-create-fail-first"
@@ -183,15 +248,11 @@ assert_not_contains "never treated as Entra propagation lag" "$OUT" "waiting for
 assert_count "only one create attempt, not six" 1 "$FAKE_AZ_STATE/calls.log" \
   "role assignment create --assignee-object-id obj-azflow-infra-staging --assignee-principal-type ServicePrincipal --role Role Based Access Control Administrator --scope $S/rg-azflow-staging"
 
-section "gh unavailable: variables are printed, nothing fails"
-new_state
-: >"$FAKE_AZ_STATE/gh-not-authenticated"
-run_seed
-assert_eq "exit code" 0 "$RC"
-assert_contains "printed" "$OUT" "AZFLOW_STAGING_CLIENT_ID=app-azflow-infra-staging"
-[ ! -e "$FAKE_AZ_STATE/gh-vars.log" ] && pass || fail "gh variables written without authentication"
+section "--no-gh or a failing repo: variables are printed, nothing fails"
 new_state
 run_seed --no-gh
+assert_eq "--no-gh exit code" 0 "$RC"
+assert_contains "--no-gh prints" "$OUT" "AZFLOW_STAGING_CLIENT_ID=app-azflow-infra-staging"
 assert_contains "--no-gh prints" "$OUT" "AZFLOW_TENANT_ID=tenant-fake"
 [ ! -e "$FAKE_AZ_STATE/gh-vars.log" ] && pass || fail "--no-gh wrote variables"
 new_state
