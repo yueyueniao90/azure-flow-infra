@@ -5,13 +5,16 @@ the delivery flow (staging stage, end-to-end tests that gate releases, promotion
 domain) is the point. Part of a three-repository set: this repo (public), `azure-flow-web` and `azure-flow-api`
 (both private).
 
-This repository currently holds step 1 of the build: per-stage settings, the Bicep for a staging and a production
-stage, a read-only preflight check, and the seed script. The infra pipeline (GitHub Actions) comes next.
+This repository holds step 1 (per-stage settings, the Bicep for a staging and a production stage, a read-only
+preflight check, the seed script) and step 2: the GitHub Actions pipeline that previews and applies the Bicep, plus
+the manual workflows that stop, start and destroy the demo so it does not run up credit.
 
 ```
 stages/            per-stage settings (staging.json, production.json)
 bicep/             main.bicep (stage entry point), staging/production .bicepparam, modules/ (one per resource kind)
-bootstrap/         preflight.sh (read-only checks), seed.sh (one-time setup), lib.sh (shared)
+bootstrap/         preflight.sh (read-only checks), seed.sh (one-time setup), github-environments.sh, lib.sh (shared)
+ci/                stage.sh: the logic the workflows call, testable offline against the fake `az`
+.github/workflows/ checks, preview, apply, cluster-stop, cluster-start, destroy (see "The pipeline" below)
 tests/             offline test suite: tests/run.sh
 ```
 
@@ -20,23 +23,32 @@ tests/             offline test suite: tests/run.sh
 | Tool | Needed for |
 | --- | --- |
 | [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) (`az`) | preflight and seed |
-| [GitHub CLI](https://cli.github.com/) (`gh`), authenticated | seed writes repository variables (optional: otherwise it prints them) |
-| `jq` | preflight, seed, tests |
-| `shellcheck`, and the Bicep CLI: either standalone [`bicep`](https://aka.ms/bicep-install) or `az bicep` (`az bicep install`) | tests only |
+| [GitHub CLI](https://cli.github.com/) (`gh`), authenticated | seed writes repository variables (optional: otherwise it prints them); `bootstrap/github-environments.sh` needs admin rights on the repository |
+| `jq` | preflight, seed, github-environments, tests |
+| `shellcheck`, the Bicep CLI (standalone [`bicep`](https://aka.ms/bicep-install) or `az bicep`), [`actionlint`](https://github.com/rhysd/actionlint) | tests only |
 
 You need to be able to create app registrations in your Entra tenant and to assign roles on the subscription
 (Owner of the subscription is enough). The scripts also run on the macOS default bash (3.2).
 
-## First-time setup
+## First-run order
+
+Everything below runs from the captain's own machine, signed in with the captain's own `az login` and `gh auth
+login`; no worker or pipeline ever uses that login (see "The pipeline"). Four steps, in this order:
 
 ```bash
 az login
 export AZFLOW_SUBSCRIPTION_ID="$(az account show --query id -o tsv)"   # see "Stage settings" for why
 
-bootstrap/preflight.sh            # read-only; PASS/FAIL table, non-zero exit on any blocker
-bootstrap/seed.sh --dry-run       # prints every planned action, changes nothing
-bootstrap/seed.sh                 # the real thing; safe to re-run
+bootstrap/preflight.sh                 # 1. read-only; PASS/FAIL table, non-zero exit on any blocker
+bootstrap/seed.sh --dry-run            # 2. prints every planned action, changes nothing
+bootstrap/seed.sh                      #    the real thing; safe to re-run. Writes the repository variables below.
+bootstrap/github-environments.sh       # 3. creates the `staging` and `production` GitHub environments (--dry-run first)
+git push                               # 4. merge the pipeline to main: apply.yml runs, staging then production
 ```
+
+Step 4 is the first real deployment. `apply.yml` deploys staging automatically, then pauses `apply-production` for
+the captain's approval (see "Approving a production apply" below). Until the seed (step 2) has run, `preview.yml`
+and `apply.yml` report a clear "run the seed first" message instead of failing; see "The pipeline".
 
 On a fresh subscription the preflight can not read quota or VM sizes because `Microsoft.Compute` is not registered
 yet. It then reports FAIL/UNKNOWN rows. Register the providers first (free, idempotent), then run the preflight again:
@@ -172,6 +184,53 @@ Identifiers only, no secrets. `<S>` is `STAGING` or `PRODUCTION`.
 If `gh` is missing, unauthenticated (or you pass `--no-gh`) or a repository is not reachable yet, the seed prints
 the values for you to set by hand.
 
+## The pipeline
+
+All of it is GitHub Actions, in `.github/workflows/`. Nothing in it ever uses the captain's own Azure or GitHub
+login: every job that talks to Azure signs in with one of the OIDC identities the seed created (see "Access
+model"), scoped to one stage's resource group. `ci/stage.sh` holds the logic every job calls, so it can be tested
+offline against a fake `az` (`tests/test_ci.sh`) instead of only being provable by running the real workflow.
+
+| Workflow | Runs on | What it does |
+| --- | --- | --- |
+| `checks.yml` | every pull request, every push to `main` | `tests/run.sh` (shellcheck, Bicep build/lint, the bash suites) plus `actionlint`. No Azure login. |
+| `preview.yml` | pull requests that touch `bicep/**` or `stages/**`, same-repository only | `az deployment group what-if` for each stage with the read-only preview identity (`AZFLOW_PREVIEW_CLIENT_ID`); posts the result to the job summary and to one pull-request comment it updates on every push. A fork pull request gets no Azure token, so the job skips cleanly. Before the seed has run (no resource group yet) it says so instead of failing. |
+| `apply.yml` | pushes to `main` touching `bicep/**` or `stages/**`, and manual dispatch | `apply-staging` deploys staging, then `apply-production` (needs `apply-staging`) deploys production. Each job uses the matching GitHub environment and identity. The job summary lists the DNS zone's name servers (for the Route 53 delegation, see below). |
+| `cluster-stop.yml` / `cluster-start.yml` | manual only | `az aks stop` / `az aks start` on one stage or both, so the cluster VM (the bulk of the cost) is not paying for idle time. |
+| `destroy.yml` | manual only | Deletes a stage's resources, and with `include_shared` the shared group (the DNS zone) too. See "Destroying the demo". |
+
+`apply.yml`, `cluster-stop.yml`, `cluster-start.yml` and `destroy.yml` all share one concurrency group
+(`azflow-infra`): only one of them runs at a time, a run already in progress (including one paused on the
+production approval) is never cancelled, and a newer queued run replaces an older queued one.
+
+### Approving a production apply
+
+`apply-production` (in `apply.yml`, and the production job of `cluster-stop`/`cluster-start`/`destroy`) targets the
+GitHub environment `production`, which `bootstrap/github-environments.sh` configures with the captain
+(`yueyueniao90`) as its one required reviewer. When such a run reaches that job, GitHub pauses it and shows it
+under the repository's **Actions** tab as *Waiting*; open the run and use **Review deployments** to approve or
+reject. The captain may approve their own run (there is one developer); nobody else can approve it, and nobody
+without write access to the repository can trigger the run in the first place.
+
+### Stopping and starting the clusters
+
+Run **cluster-stop** from the Actions tab (or `gh workflow run cluster-stop.yml -f stage=both`) whenever the demo
+is not being watched; the AKS node VM is what actually costs credit (see "What costs credit" below), and stopping
+it is free while it is off. Run **cluster-start** the same way before a demo. Both take `stage: staging`,
+`production` or `both`; a stopped cluster also blocks `apply.yml` for that stage until it is started again (Azure
+rejects updates to a stopped cluster), and the error names this workflow.
+
+### Destroying the demo
+
+**`destroy.yml` deletes real resources and cannot be undone.** Run it from the Actions tab with the confirmation
+input typed exactly as `destroy azflow`; anything else is rejected before anything is touched. It deletes the
+staging and production resource groups; tick `include_shared` to also delete the shared group that holds the DNS
+zone (off by default, since the two stages can be recreated without losing the zone). The production deletion
+waits for the same `production` environment approval as a normal apply. **When the shared group is deleted, delete
+the Route 53 `NS` record for `demo.zzll.de` too** (the workflow summary repeats this): the Azure zone is gone, and
+a dangling delegation lets anyone who creates a zone with that name in their own Azure account claim the subdomain.
+See "DNS" below for the exact record.
+
 ## What costs credit and what is free
 
 | Free | Costs credit |
@@ -181,8 +240,9 @@ the values for you to set by hand.
 | Resource groups, role assignments, app registrations, federated credentials | Public IP and load balancer the cluster creates for ingress, and the node's OS disk (32 GB, set small) |
 | Resource provider registration | The Azure DNS zone (small monthly fee plus per-query cost) |
 
-Deliberately not used: monitoring or Log Analytics, Key Vault, autoscaling, extra nodes, premium tiers. Stopping the
-clusters and destroying the stages come with the infra pipeline (step 2).
+Deliberately not used: monitoring or Log Analytics, Key Vault, autoscaling, extra nodes, premium tiers. Use the
+**cluster-stop** workflow when the demo is not being watched, and **destroy** when it is done for good (see "The
+pipeline" above); both are manual so nothing is torn down without asking.
 
 ## The free trial and its spending limit
 
@@ -196,12 +256,11 @@ its credit and its spending limit. Check the exact terms and remaining credit in
 
 `zzll.de` stays in AWS Route 53; only the subdomain `demo.zzll.de` is delegated to the Azure DNS zone.
 
-1. Let the infra pipeline create the stages (the zone is created by the stage deployments). Then read the zone's
-   four name servers:
+1. Let `apply.yml` create the stages (the zone is created by the stage deployments; see "The pipeline"). Its job
+   summary already lists the four name servers; to read them again later:
    ```bash
    az network dns zone show --resource-group rg-azflow-shared --name demo.zzll.de --query nameServers -o tsv
    ```
-   (They are also the `dnsNameServers` output of the stage deployments.)
 2. In the AWS console open **Route 53 > Hosted zones > `zzll.de` > Create record** and enter:
    - Record name: `demo`
    - Record type: `NS`
@@ -224,16 +283,20 @@ Hostname binding and HTTPS certificates are set up in step 7; until then the zon
 tests/run.sh
 ```
 
-One command, offline. It runs shellcheck over all scripts, builds and lints all Bicep files (warnings fail), checks
-cost and security invariants of the compiled template (free tiers, one node, no monitoring or Key Vault, role
-assignments limited to what the seed's RBAC condition allows), and runs the preflight and the seed against a fake
-`az` and `gh` on `PATH`: dry run, first run, idempotent second run, least-privilege scopes, retries, separate
-subscriptions per stage. Nothing talks to Azure; the tests never touch a real login.
+One command, offline. It runs shellcheck over all scripts (including `ci/stage.sh` and the fakes), builds and lints
+all Bicep files (warnings fail), checks cost and security invariants of the compiled template (free tiers, one
+node, no monitoring or Key Vault, role assignments limited to what the seed's RBAC condition allows), runs the
+preflight, the seed, `bootstrap/github-environments.sh` and `ci/stage.sh` against a fake `az` and `gh` on `PATH`
+(dry run, first run, idempotent second run, least-privilege scopes, retries, separate subscriptions per stage), and
+checks the workflow files themselves with `actionlint` plus repository-specific rules (every third-party action
+pinned to a full commit SHA, least-privilege `permissions` per job, `id-token: write` only where a job logs in, no
+`pull_request_target`, no event text interpolated into `run:` shell, no identifiers or secrets committed). Nothing
+talks to Azure or GitHub; the tests never touch a real login.
 
 The Bicep suite uses the standalone `bicep` CLI when it is on `PATH` and otherwise falls back to `az bicep`
 (called as `az bicep <build|build-params|lint> --file <file>`). That fallback only compiles local files; it never
 signs in or touches a subscription. Without either tool the suite fails with install instructions, unless you set
-`AZFLOW_SKIP_BICEP=1`.
+`AZFLOW_SKIP_BICEP=1`; similarly `AZFLOW_SKIP_ACTIONLINT=1` skips the workflow linter if it cannot be installed.
 
 ## Known limits and follow-ups
 
@@ -246,3 +309,9 @@ signs in or touches a subscription. Without either tool the suite fails with ins
 - DNS Zone Contributor for the api identity is zone-wide; it could be narrowed to record-set scope once the records exist.
 - A custom role for the infra identities could replace Contributor with an exact action list.
 - A production stage in its own subscription needs the seed run once more; cross-subscription paths are only exercised against the fake `az`, not a real second subscription.
+- The pipeline (step 2) is also verified offline only (`actionlint`, the fake `az`/`gh`, and the repository-specific
+  checks in `tests/test_workflows.sh` and `tests/test_ci.sh`): the OIDC logins, the environment approval gate and
+  the preview comment are unproven against real GitHub Actions and Azure until the first run after the seed.
+- `preview.yml`'s read-only identity needs the custom `azflow-deployment-whatif` role (see "Access model") already
+  assigned to the stage and shared groups; until the seed has run once, the preview step reports that plainly
+  instead of failing.

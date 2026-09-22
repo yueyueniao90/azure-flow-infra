@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # One command runs everything, offline: shellcheck, Bicep build and lint, and the bash suites
-# (preflight and seed against a fake `az`). Needs: bash, jq, shellcheck, bicep (or az bicep).
+# (preflight, seed, environments and the CI script against a fake `az` and `gh`) and the workflow checks.
+# Needs: bash, jq, shellcheck, bicep (or az bicep), actionlint.
 #   tests/run.sh
-# Set AZFLOW_SKIP_SHELLCHECK=1 or AZFLOW_SKIP_BICEP=1 to skip a tool you cannot install.
+# Set AZFLOW_SKIP_SHELLCHECK=1, AZFLOW_SKIP_BICEP=1 or AZFLOW_SKIP_ACTIONLINT=1 to skip a tool you cannot install.
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
@@ -28,7 +29,7 @@ shellcheck_all() {
     echo "shellcheck not found (brew install shellcheck) or set AZFLOW_SKIP_SHELLCHECK=1" >&2
     return 1
   fi
-  shellcheck -x bootstrap/*.sh tests/*.sh tests/fake-bin/az tests/fake-bin/gh && echo "shellcheck: clean"
+  shellcheck -x bootstrap/*.sh ci/*.sh tests/*.sh tests/fake-bin/az tests/fake-bin/gh && echo "shellcheck: clean"
 }
 
 step "shellcheck" shellcheck_all
@@ -36,6 +37,9 @@ step "stage files" bash tests/test_stages.sh
 step "bicep" bash tests/test_bicep.sh
 step "preflight" bash tests/test_preflight.sh
 step "seed" bash tests/test_seed.sh
+step "github environments" bash tests/test_environments.sh
+step "ci script" bash tests/test_ci.sh
+step "workflows" bash tests/test_workflows.sh
 
 printf '\n'
 if [ "$failed" -eq 0 ]; then

@@ -1,0 +1,108 @@
+name: destroy
+
+# Manual and destructive: deletes the stage resource groups (and with include_shared the shared group with the DNS
+# zone) so the demo stops using credit. Everything in them is lost. Production deletion waits for the captain's
+# approval of the `production` environment. Type the confirmation text exactly: destroy azflow
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type exactly "destroy azflow" to confirm'
+        type: string
+        required: true
+      include_shared:
+        description: Also delete the shared group with the DNS zone (then remove the Route 53 NS record)
+        type: boolean
+        required: false
+        default: false
+
+permissions: {}
+
+# Serialized with apply, stop and start; never cancels a run that is going.
+concurrency:
+  group: azflow-infra
+  cancel-in-progress: false
+
+jobs:
+  confirm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    env:
+      CONFIRM: ${{ inputs.confirm }}
+      REF: ${{ github.ref }}
+    steps:
+      - name: Check the confirmation text and the branch
+        run: |
+          if [ "$CONFIRM" != "destroy azflow" ]; then
+            echo "::error::The confirmation text does not match. Nothing was deleted. Run again and type exactly: destroy azflow"
+            exit 1
+          fi
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::Run this workflow from main. Nothing was deleted."
+            exit 1
+          fi
+
+  destroy-staging:
+    needs: confirm
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write # Azure OIDC login
+    env:
+      AZFLOW_SUBSCRIPTION_ID: ${{ vars.AZFLOW_STAGING_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Azure login (staging infra identity)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZFLOW_STAGING_CLIENT_ID }}
+          tenant-id: ${{ vars.AZFLOW_TENANT_ID }}
+          subscription-id: ${{ vars.AZFLOW_STAGING_SUBSCRIPTION_ID }}
+
+      - name: Delete the staging resource group
+        run: |
+          echo "### Destroy: staging" >> "$GITHUB_STEP_SUMMARY"
+          bash ci/stage.sh destroy staging
+
+  # The shared group is deleted here, with the production identity, so the production approval covers it too.
+  destroy-production:
+    needs: destroy-staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: production # required reviewer: the run pauses here until approved
+    permissions:
+      contents: read
+      id-token: write # Azure OIDC login
+    env:
+      AZFLOW_SUBSCRIPTION_ID: ${{ vars.AZFLOW_PRODUCTION_SUBSCRIPTION_ID }}
+      INCLUDE_SHARED: ${{ inputs.include_shared }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Azure login (production infra identity)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZFLOW_PRODUCTION_CLIENT_ID }}
+          tenant-id: ${{ vars.AZFLOW_TENANT_ID }}
+          subscription-id: ${{ vars.AZFLOW_PRODUCTION_SUBSCRIPTION_ID }}
+
+      - name: Delete the production resource group (and the shared one if asked)
+        run: |
+          echo "### Destroy: production" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$INCLUDE_SHARED" = "true" ]; then
+            bash ci/stage.sh destroy production --shared
+          else
+            bash ci/stage.sh destroy production
+            {
+              echo
+              echo "The shared group with the DNS zone was kept (include_shared was off), so the Route 53 delegation for demo.zzll.de is still valid."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

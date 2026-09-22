@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Fake GitHub CLI for the offline tests: records `gh variable set` calls in $FAKE_AZ_STATE/gh-vars.log.
+# Fake GitHub CLI for the offline tests: records `gh variable set` calls in $FAKE_AZ_STATE/gh-vars.log and keeps a tiny
+# model of `gh api` for environments (gh-env.<name>.json, gh-policies.<name>, request bodies in gh-api-bodies.log).
 set -u
 : "${FAKE_AZ_STATE:?}"
 printf '%s\n' "$*" >>"$FAKE_AZ_STATE/gh-calls.log"
@@ -21,6 +22,79 @@ case "${1:-} ${2:-}" in
     done
     if [ -f "$FAKE_AZ_STATE/gh-fail-repo" ] && [ "$(cat "$FAKE_AZ_STATE/gh-fail-repo")" = "$repo" ]; then exit 1; fi
     printf '%s\t%s\t%s\n' "$repo" "$name" "$body" >>"$FAKE_AZ_STATE/gh-vars.log"
+    ;;
+  "api "*)
+    shift
+    method=GET
+    path=""
+    input=""
+    jqf=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --method | -X)
+          method="$2"
+          shift
+          ;;
+        --input)
+          input="$2"
+          shift
+          ;;
+        --jq)
+          jqf="$2"
+          shift
+          ;;
+        -*) ;;
+        *) path="$1" ;;
+      esac
+      shift
+    done
+    body=""
+    if [ "$input" = "-" ]; then
+      body="$(cat)"
+      printf '%s %s %s\n' "$method" "$path" "$body" >>"$FAKE_AZ_STATE/gh-api-bodies.log"
+    fi
+    [ ! -e "$FAKE_AZ_STATE/gh-api-fails" ] || {
+      echo "fake gh: HTTP 403" >&2
+      exit 1
+    }
+    reply=""
+    case "$method $path" in
+      "GET users/"*)
+        reply="$(jq -cn --arg l "${path#users/}" '{login: $l, id: 424242}')"
+        ;;
+      "PUT repos/"*"/environments/"*)
+        name="${path##*/}"
+        printf '%s\n' "$body" >"$FAKE_AZ_STATE/gh-env.$name.json"
+        touch "$FAKE_AZ_STATE/gh-policies.$name"
+        reply="$body"
+        ;;
+      "GET repos/"*"/deployment-branch-policies")
+        name="${path%/deployment-branch-policies}"
+        name="${name##*/}"
+        touch "$FAKE_AZ_STATE/gh-policies.$name"
+        reply="$(jq -Rn '[inputs | split("\t") | {id: (.[0] | tonumber), name: .[1], type: .[2]}] | {total_count: length, branch_policies: .}' <"$FAKE_AZ_STATE/gh-policies.$name")"
+        ;;
+      "POST repos/"*"/deployment-branch-policies")
+        name="${path%/deployment-branch-policies}"
+        name="${name##*/}"
+        n="$(wc -l <"$FAKE_AZ_STATE/gh-policies.$name" | tr -d ' ')"
+        printf '%s\t%s\t%s\n' "$((n + 100))" "$(printf '%s' "$body" | jq -r .name)" "$(printf '%s' "$body" | jq -r .type)" >>"$FAKE_AZ_STATE/gh-policies.$name"
+        reply='{}'
+        ;;
+      "DELETE repos/"*"/deployment-branch-policies/"*)
+        id="${path##*/}"
+        name="${path%/deployment-branch-policies/*}"
+        name="${name##*/}"
+        grep -v "^$id	" "$FAKE_AZ_STATE/gh-policies.$name" >"$FAKE_AZ_STATE/gh-policies.tmp" || true
+        mv "$FAKE_AZ_STATE/gh-policies.tmp" "$FAKE_AZ_STATE/gh-policies.$name"
+        reply='{}'
+        ;;
+      *)
+        echo "fake gh: unsupported api call: $method $path" >&2
+        exit 99
+        ;;
+    esac
+    if [ -n "$jqf" ]; then printf '%s\n' "$reply" | jq -r "$jqf"; else printf '%s\n' "$reply"; fi
     ;;
   *)
     echo "fake gh: unsupported: $*" >&2
