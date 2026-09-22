@@ -203,7 +203,7 @@ cp "$REPO_ROOT"/stages/*.json "$tmp/"
 jq '.subscriptionId = "$AZFLOW_PROD_SUBSCRIPTION_ID"' "$tmp/production.json" >"$tmp/p.json" && mv "$tmp/p.json" "$tmp/production.json"
 AZFLOW_STAGES_DIR="$tmp" AZFLOW_PROD_SUBSCRIPTION_ID="sub-prod" run_seed
 assert_eq "exit code" 0 "$RC"
-assert_file_contains "prod group in prod subscription" "$FAKE_AZ_STATE/calls.log" "group create --name rg-azflow-prod --location germanywestcentral --subscription sub-prod"
+assert_file_contains "prod group in prod subscription" "$FAKE_AZ_STATE/calls.log" "group create --name rg-azflow-prod --location westeurope --subscription sub-prod"
 assert_file_contains "staging group in staging subscription" "$FAKE_AZ_STATE/calls.log" "group create --name rg-azflow-staging --location westeurope --subscription sub-test"
 assert_file_contains "prod scope uses prod subscription" "$FAKE_AZ_STATE/roles.jsonl" '"scope":"/subscriptions/sub-prod/resourceGroups/rg-azflow-prod"'
 assert_file_contains "prod variable" "$FAKE_AZ_STATE/gh-vars.log" "AZFLOW_PRODUCTION_SUBSCRIPTION_ID	sub-prod"

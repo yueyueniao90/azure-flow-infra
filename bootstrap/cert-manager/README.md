@@ -89,6 +89,6 @@ is exactly what step 4's staging-first ordering protects against.
 ## Node capacity
 
 cert-manager's three components (controller, webhook, cainjector) are lightweight (roughly 200-300 MiB
-combined at defaults) and should fit alongside the API's pod on the single `Standard_B2s` node, but
+combined at defaults) and should fit alongside the API's pod on the single `Standard_B2s_v2` node, but
 there is no autoscaler and no second node to fail over to — worth confirming after the first real
 install.

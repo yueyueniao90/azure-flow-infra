@@ -98,8 +98,10 @@ run the seed again. The `.bicepparam` files read the shared group's subscription
 `shared.subscriptionId` names; both stage files must resolve it to the same value (preflight and the seed check this).
 The deployment itself targets whichever subscription the pipeline (or `az --subscription`) selects.
 
-`location` is a per-stage setting on purpose: the free trial allows 4 vCPU per region, so one 2-vCPU node per
-cluster only fits when the two stages are in different regions (staging `westeurope`, production `germanywestcentral`).
+`location` is a per-stage setting on purpose: it lets staging and production use different regions if a
+subscription's per-region quota or VM-size availability requires it. Both stages currently use `westeurope` with
+`nodeSize` `Standard_B2s_v2`; together their two 2-vCPU nodes consume this account's full 4-vCPU free allowance for
+that VM family in that region, leaving no headroom for a third node there.
 
 ### Naming scheme
 
@@ -111,7 +113,7 @@ cluster only fits when the two stages are in different regions (staging `westeur
 | Static Web App | `swa-azflow-staging` | `swa-azflow-prod` |
 | web host | `staging.demo.zzll.de` | `app.demo.zzll.de` |
 | api host | `api-staging.demo.zzll.de` | `api.demo.zzll.de` |
-| region | `westeurope` | `germanywestcentral` |
+| region | `westeurope` | `westeurope` |
 
 Shared by both stages: resource group `rg-azflow-shared` holding the Azure DNS zone `demo.zzll.de`.
 
