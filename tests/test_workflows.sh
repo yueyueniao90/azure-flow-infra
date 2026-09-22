@@ -23,6 +23,11 @@ fi
 # triggers <file>: the event names under `on:`
 triggers() { awk '/^on:/ {t=1; next} /^[a-z]/ {t=0} t && /^  [a-z_]+:/ {sub(/:.*/, ""); gsub(/ /, ""); printf "%s ", $0}' "$1"; }
 
+# job_body <file> <job>: the lines belonging to one job (its own `if:`, `environment:`, `needs:`, `env:` and
+# `steps:`), stopping at the next top-level job. Lets assertions below check a field or command is set on the
+# right job, not merely present somewhere in the file.
+job_body() { awk -v job="  $2:" '$0 == job {in_job = 1; next} in_job && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {in_job = 0} in_job' "$1"; }
+
 section "the expected workflows exist"
 for f in checks preview apply cluster-stop cluster-start destroy; do
   [ -f "$WF/$f.yml" ] && pass || fail "missing $WF/$f.yml"
@@ -76,12 +81,13 @@ p="$WF/preview.yml"
 assert_file_contains "runs on pull requests" "$p" "pull_request:"
 assert_file_contains "only for bicep and stages" "$p" '- "bicep/**"'
 assert_file_contains "only for bicep and stages" "$p" '- "stages/**"'
-assert_file_contains "same-repo pull requests only" "$p" "github.event.pull_request.head.repo.full_name == github.repository"
-assert_file_contains "read-only preview identity" "$p" "vars.AZFLOW_PREVIEW_CLIENT_ID"
-assert_file_contains "what-if staging" "$p" "ci/stage.sh what-if staging"
-assert_file_contains "what-if production" "$p" "ci/stage.sh what-if production"
-assert_file_contains "updates one comment" "$p" "updateComment"
-assert_file_contains "job summary" "$p" 'GITHUB_STEP_SUMMARY'
+wi="$(job_body "$p" what-if)"
+assert_contains "same-repo pull requests only" "$wi" "github.event.pull_request.head.repo.full_name == github.repository"
+assert_contains "read-only preview identity" "$wi" "vars.AZFLOW_PREVIEW_CLIENT_ID"
+assert_contains "what-if staging" "$wi" "ci/stage.sh what-if staging"
+assert_contains "what-if production" "$wi" "ci/stage.sh what-if production"
+assert_contains "updates one comment" "$wi" "updateComment"
+assert_contains "job summary" "$wi" 'GITHUB_STEP_SUMMARY'
 assert_eq "preview trigger" "pull_request " "$(triggers "$p")"
 assert_eq "preview uses no environment" 0 "$(grep -c 'environment:' "$p" || true)"
 
@@ -92,16 +98,19 @@ assert_file_contains "push to main" "$a" "branches: [main]"
 assert_file_contains "manual dispatch" "$a" "workflow_dispatch:"
 assert_file_contains "serialized" "$a" "group: azflow-infra"
 assert_file_contains "never cancels a running run" "$a" "cancel-in-progress: false"
-assert_file_contains "staging environment" "$a" "environment: staging"
-assert_file_contains "production environment" "$a" "environment: production"
-assert_file_contains "production waits for staging" "$a" "needs: apply-staging"
-assert_file_contains "applies staging" "$a" "ci/stage.sh apply staging"
-assert_file_contains "applies production" "$a" "ci/stage.sh apply production"
+as="$(job_body "$a" apply-staging)"
+ap="$(job_body "$a" apply-production)"
+assert_contains "staging environment" "$as" "environment: staging"
+assert_contains "production environment" "$ap" "environment: production"
+assert_contains "production waits for staging" "$ap" "needs: apply-staging"
+assert_contains "applies staging" "$as" "ci/stage.sh apply staging"
+assert_contains "applies production" "$ap" "ci/stage.sh apply production"
 for v in AZFLOW_NAME_SUFFIX AZFLOW_API_PRINCIPAL_ID AZFLOW_WEB_PRINCIPAL_ID AZFLOW_SUBSCRIPTION_ID; do
-  assert_count "$v passed to both stages" 2 "$a" "      $v:"
+  assert_contains "$v passed to staging" "$as" "      $v:"
+  assert_contains "$v passed to production" "$ap" "      $v:"
 done
-assert_file_contains "staging identity" "$a" "vars.AZFLOW_STAGING_CLIENT_ID"
-assert_file_contains "production identity" "$a" "vars.AZFLOW_PRODUCTION_CLIENT_ID"
+assert_contains "staging identity" "$as" "vars.AZFLOW_STAGING_CLIENT_ID"
+assert_contains "production identity" "$ap" "vars.AZFLOW_PRODUCTION_CLIENT_ID"
 
 section "cluster-stop.yml and cluster-start.yml"
 for w in stop start; do
@@ -109,10 +118,12 @@ for w in stop start; do
   assert_file_contains "$w: manual only" "$c" "workflow_dispatch:"
   assert_eq "$w: no other trigger" "workflow_dispatch " "$(triggers "$c")"
   assert_file_contains "$w: stage input" "$c" "- both"
-  assert_file_contains "$w: staging environment" "$c" "environment: staging"
-  assert_file_contains "$w: production environment" "$c" "environment: production"
-  assert_file_contains "$w: staging" "$c" "ci/stage.sh aks $w staging"
-  assert_file_contains "$w: production" "$c" "ci/stage.sh aks $w production"
+  stg="$(job_body "$c" "$w-staging")"
+  prod="$(job_body "$c" "$w-production")"
+  assert_contains "$w: staging environment" "$stg" "environment: staging"
+  assert_contains "$w: production environment" "$prod" "environment: production"
+  assert_contains "$w: staging" "$stg" "ci/stage.sh aks $w staging"
+  assert_contains "$w: production" "$prod" "ci/stage.sh aks $w production"
   assert_file_contains "$w: never cancels" "$c" "cancel-in-progress: false"
 done
 
@@ -120,14 +131,17 @@ section "destroy.yml"
 d="$WF/destroy.yml"
 assert_file_contains "manual only" "$d" "workflow_dispatch:"
 assert_eq "no other trigger" "workflow_dispatch " "$(triggers "$d")"
-assert_file_contains "confirmation text" "$d" '"destroy azflow"'
 assert_file_contains "include_shared input" "$d" "include_shared:"
 assert_file_contains "include_shared is off by default" "$d" "default: false"
-assert_file_contains "production is approval gated" "$d" "environment: production"
-assert_file_contains "staging environment" "$d" "environment: staging"
-assert_file_contains "shared only on request" "$d" "ci/stage.sh destroy production --shared"
-assert_file_contains "production job waits for staging" "$d" "needs: destroy-staging"
-assert_file_contains "azure jobs wait for the confirmation" "$d" "needs: confirm"
-assert_file_contains "Route 53 reminder" "$d" "Route 53"
+cf="$(job_body "$d" confirm)"
+ds="$(job_body "$d" destroy-staging)"
+dp="$(job_body "$d" destroy-production)"
+assert_contains "confirmation text" "$cf" '"destroy azflow"'
+assert_contains "staging environment" "$ds" "environment: staging"
+assert_contains "production is approval gated" "$dp" "environment: production"
+assert_contains "shared only on request" "$dp" "ci/stage.sh destroy production --shared"
+assert_contains "production job waits for staging" "$dp" "needs: destroy-staging"
+assert_contains "azure jobs wait for the confirmation" "$ds" "needs: confirm"
+assert_contains "Route 53 reminder" "$dp" "Route 53"
 
 finish "workflows"
