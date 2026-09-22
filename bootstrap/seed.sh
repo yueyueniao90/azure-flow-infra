@@ -64,11 +64,23 @@ plan() { printf '  [dry-run] %s\n' "$*"; }
 did() { printf '  + %s\n' "$*"; }
 have() { printf '  = %s (already there)\n' "$*"; }
 
-# retry <description> <command...>: role and credential writes can lag behind a new service principal.
+# Azure errors that are permanent validation failures, not propagation lag: retrying an identical
+# request can never fix these, so retry() below fails fast on them instead of spending 6 attempts.
+# Matched against stderr text/code, not guessed from timing. Extend only with errors confirmed
+# permanent (a fixed request that is rejected the same way every time).
+PERMANENT_ERROR_PATTERN='InvalidCreateOrUpdateRoleAssignmentRequest|The given role assignment condition is invalid'
+
+# retry <description> <command...>: role and credential writes can lag behind a new service principal,
+# so most failures are worth a few attempts. A permanent validation failure (see PERMANENT_ERROR_PATTERN
+# above) is not: it fails the same way every time, so it dies immediately instead of retrying.
 retry() {
-  local what="$1" n=1 max=6
+  local what="$1" n=1 max=6 err="$WORK/retry-stderr"
   shift
-  until "$@"; do
+  until "$@" 2>"$err"; do
+    cat "$err" >&2
+    if grep -Eq "$PERMANENT_ERROR_PATTERN" "$err"; then
+      die "$what: Azure rejected this permanently (not retrying); see the error above"
+    fi
     if [ "$n" -ge "$max" ]; then
       die "$what failed after $max attempts"
     fi
@@ -265,11 +277,13 @@ ensure_fedcred() { # <identity name> <app id> <credential name> <subject>
 # ---- 5. role assignments ------------------------------------------------------------------------
 
 # Role Based Access Control Administrator, limited to assigning/removing only the listed roles.
+# The ActionMatches{...} action name must be a single-quoted string literal per Microsoft's documented
+# ABAC grammar; the GuidEquals {...} role IDs are bare, comma-separated GUIDs (see README, "Access model").
 rbac_condition() { # <role id>...
   local ids="" id
   for id in "$@"; do ids="$ids$id, "; done
   ids="${ids%, }"
-  printf '((!(ActionMatches{Microsoft.Authorization/roleAssignments/write})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {%s})) AND ((!(ActionMatches{Microsoft.Authorization/roleAssignments/delete})) OR (@Resource[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {%s}))' "$ids" "$ids"
+  printf "((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {%s})) AND ((!(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'})) OR (@Resource[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {%s}))" "$ids" "$ids"
 }
 
 stage_rbac_condition() {

@@ -114,10 +114,16 @@ for id in "$ROLE_RBAC_ADMIN" "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9" "8e3af657-a8
 done
 assert_contains "condition guards writes" "$cond" "roleAssignments/write"
 assert_contains "condition guards deletes" "$cond" "roleAssignments/delete"
+# Azure ABAC requires the ActionMatches{...} action name to be a single-quoted string literal
+# (learn.microsoft.com/azure/role-based-access-control/delegate-role-assignments-examples); an
+# unquoted action name is what actually broke the captain's real seed.sh run.
+assert_contains "condition quotes the write ActionMatches action" "$cond" "ActionMatches{'Microsoft.Authorization/roleAssignments/write'}"
+assert_contains "condition quotes the delete ActionMatches action" "$cond" "ActionMatches{'Microsoft.Authorization/roleAssignments/delete'}"
 shared_cond="$(jq -s -r '[.[] | select(.principalId == "obj-azflow-infra-staging" and .roleDefinitionName == "Role Based Access Control Administrator" and .scope == "'"$S"'/rg-azflow-shared")][0].condition' "$roles")"
 assert_contains "shared rg allows DNS Zone Contributor" "$shared_cond" "$ROLE_DNS_ZONE_CONTRIBUTOR"
 assert_not_contains "shared rg does not allow AcrPush" "$shared_cond" "$ROLE_ACR_PUSH"
 assert_not_contains "shared rg does not allow Contributor" "$shared_cond" "$ROLE_CONTRIBUTOR"
+assert_contains "shared rg condition also quotes ActionMatches" "$shared_cond" "ActionMatches{'Microsoft.Authorization/roleAssignments/write'}"
 
 section "GitHub variables"
 vars="$FAKE_AZ_STATE/gh-vars.log"
@@ -165,6 +171,17 @@ echo 3 >"$FAKE_AZ_STATE/role-create-fail-first"
 run_seed
 assert_eq "exit code after transient failures" 0 "$RC"
 assert_contains "warned about retry" "$OUT" "waiting for Entra"
+
+section "an invalid role condition is a permanent failure, not retried like a propagation delay"
+new_state
+touch "$FAKE_AZ_STATE/role-create-always-invalid-condition"
+run_seed
+assert_eq "exit code" 2 "$RC"
+assert_contains "reports the real Azure error" "$OUT" "InvalidCreateOrUpdateRoleAssignmentRequest"
+assert_contains "explains it is not retrying" "$OUT" "not retrying"
+assert_not_contains "never treated as Entra propagation lag" "$OUT" "waiting for Entra"
+assert_count "only one create attempt, not six" 1 "$FAKE_AZ_STATE/calls.log" \
+  "role assignment create --assignee-object-id obj-azflow-infra-staging --assignee-principal-type ServicePrincipal --role Role Based Access Control Administrator --scope $S/rg-azflow-staging"
 
 section "gh unavailable: variables are printed, nothing fails"
 new_state
