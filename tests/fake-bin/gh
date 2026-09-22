@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Fake GitHub CLI for the offline tests: records `gh variable set` calls in $FAKE_AZ_STATE/gh-vars.log and keeps a tiny
 # model of `gh api` for environments (gh-env.<name>.json, gh-policies.<name>, request bodies in gh-api-bodies.log).
+# `gh api repos/<owner>/<repo>/actions/oidc/customization/sub` answers the plain-subject shape (use_immutable_subject
+# off) by default; put a whole reply in gh-oidc-sub.<owner>_<repo>.json for any other shape, e.g. immutable subjects.
+# `gh api` fails like the real one when gh-not-authenticated exists.
 set -u
 : "${FAKE_AZ_STATE:?}"
 printf '%s\n' "$*" >>"$FAKE_AZ_STATE/gh-calls.log"
@@ -53,6 +56,10 @@ case "${1:-} ${2:-}" in
       body="$(cat)"
       printf '%s %s %s\n' "$method" "$path" "$body" >>"$FAKE_AZ_STATE/gh-api-bodies.log"
     fi
+    [ ! -e "$FAKE_AZ_STATE/gh-not-authenticated" ] || {
+      echo "To get started with GitHub CLI, please run:  gh auth login" >&2
+      exit 4
+    }
     [ ! -e "$FAKE_AZ_STATE/gh-api-fails" ] || {
       echo "fake gh: HTTP 403" >&2
       exit 1
@@ -61,6 +68,17 @@ case "${1:-} ${2:-}" in
     case "$method $path" in
       "GET users/"*)
         reply="$(jq -cn --arg l "${path#users/}" '{login: $l, id: 424242}')"
+        ;;
+      "GET repos/"*"/actions/oidc/customization/sub")
+        repo="${path#repos/}"
+        repo="${repo%/actions/oidc/customization/sub}"
+        owner="${repo%%/*}"
+        f="$FAKE_AZ_STATE/gh-oidc-sub.${owner}_${repo#*/}.json"
+        if [ -f "$f" ]; then
+          reply="$(cat "$f")"
+        else
+          reply="$(jq -cn --arg p "repo:$repo" '{use_default: true, use_immutable_subject: false, sub_claim_prefix: $p}')"
+        fi
         ;;
       "PUT repos/"*"/environments/"*)
         name="${path##*/}"

@@ -73,7 +73,8 @@ Act on the recommendation by editing `nodeSize` (or `location`) in the stage fil
 export `AZFLOW_NAME_SUFFIX=<short unique text>` before the preflight, the seed and every Bicep deployment.
 
 `seed.sh` never creates secrets or passwords. Sign-in from GitHub Actions uses OIDC federated credentials only.
-It needs `AZFLOW_SUBSCRIPTION_ID` set (a dry run shows a placeholder instead).
+It needs `AZFLOW_SUBSCRIPTION_ID` set and `gh` signed in (a dry run shows placeholders instead). See "Access model"
+for why it asks GitHub for each repository's token subject.
 
 ## Stage settings
 
@@ -166,6 +167,12 @@ Azure rejects an unquoted action name with `InvalidCreateOrUpdateRoleAssignmentR
 role IDs are bare, comma-separated GUIDs (no quotes). See Microsoft's
 [delegate-role-assignments-examples](https://learn.microsoft.com/azure/role-based-access-control/delegate-role-assignments-examples)
 for the reference grammar if this condition ever needs to change.
+Each federated credential's subject is the prefix GitHub reports for that repository
+(`gh api repos/<owner>/<repo>/actions/oidc/customization/sub`, field `sub_claim_prefix`) plus `:environment:<stage>`,
+`:ref:refs/heads/main` or `:pull_request`. With GitHub's immutable subjects on, that prefix is
+`repo:<owner>@<owner id>/<repo>@<repo id>` rather than `repo:<owner>/<repo>`, so a renamed or re-created repository
+cannot inherit the trust. The seed never builds the prefix itself: a subject that does not match the token fails the
+pipeline's Azure login with `AADSTS700213`. Re-running the seed updates any credential whose subject changed.
 Nothing is assigned at subscription scope, nobody is Owner, and there are no secrets: tokens are minted per run
 for a specific repository and branch or environment. Fork pull requests get no OIDC token. The production infra
 environment is protected by a required reviewer (configured with the pipeline in step 2), and only an approved
