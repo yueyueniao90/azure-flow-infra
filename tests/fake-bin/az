@@ -77,6 +77,18 @@ case "$cmd" in
   "staticwebapp show")
     [ -e "$S/swa-own.$(opt --name "$@")" ] && echo '{}' || fail "not found" 3
     ;;
+  "staticwebapp hostname")
+    case "$sub3" in
+      show)
+        n="$(opt --name "$@")"
+        h="$(opt --hostname "$@")"
+        [ -e "$S/rg.$(opt --resource-group "$@")" ] || fail "ResourceGroupNotFound" 3
+        f="$S/swa-token.$n.$h"
+        [ -f "$f" ] && cat "$f" || true
+        ;;
+      *) fail "unsupported: $*" 99 ;;
+    esac
+    ;;
   "group exists")
     [ -e "$S/rg.$(opt --name "$@")" ] && echo true || echo false
     ;;
@@ -193,6 +205,27 @@ case "$cmd" in
         ;;
       create)
         echo '{"registryLoginServer":{"type":"String","value":"acrfake.azurecr.io"},"staticWebAppDefaultHostname":{"type":"String","value":"fake.azurestaticapps.net"},"dnsNameServers":{"type":"Array","value":["ns1-01.azure-dns.com.","ns2-01.azure-dns.net.","ns3-01.azure-dns.org.","ns4-01.azure-dns.info."]}}'
+        ;;
+      *) fail "unsupported: $*" 99 ;;
+    esac
+    ;;
+  "network dns")
+    case "$sub3" in
+      record-set)
+        action="${4:-} ${5:-}"
+        case "$action" in
+          "txt add-record")
+            rg="$(opt --resource-group "$@")"
+            zone="$(opt --zone-name "$@")"
+            name="$(opt --record-set-name "$@")"
+            val="$(opt --value "$@")"
+            [ -e "$S/rg.$rg" ] || fail "ResourceGroupNotFound" 3
+            f="$S/txt.$rg.$zone.$name"
+            touch "$f"
+            grep -qxF "$val" "$f" || printf '%s\n' "$val" >>"$f"
+            ;;
+          *) fail "unsupported: $*" 99 ;;
+        esac
         ;;
       *) fail "unsupported: $*" 99 ;;
     esac

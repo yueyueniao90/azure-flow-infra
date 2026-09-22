@@ -60,6 +60,9 @@ jobs:
       - name: Deploy staging
         run: bash ci/stage.sh apply staging
 
+      - name: Static Web App custom domain - DNS ownership record
+        run: bash ci/stage.sh dns-auth staging
+
   apply-production:
     needs: apply-staging
     runs-on: ubuntu-24.04
@@ -100,3 +103,6 @@ jobs:
 
       - name: Deploy production
         run: bash ci/stage.sh apply production
+
+      - name: Static Web App custom domain - DNS ownership record
+        run: bash ci/stage.sh dns-auth production

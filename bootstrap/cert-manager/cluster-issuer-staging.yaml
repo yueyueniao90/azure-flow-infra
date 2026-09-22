@@ -1,0 +1,21 @@
+# Let's Encrypt's staging ACME server: much looser rate limits, certificates browsers don't trust.
+# Point at this issuer first on every new cluster and confirm a certificate issues cleanly before
+# ever switching to cluster-issuer-prod.yaml (see bootstrap/cert-manager/README.md).
+#
+# Applied by hand (kubectl apply -f), never by a pipeline: see bootstrap/cert-manager/README.md.
+# Edit `spec.acme.email` below to the captain's own address before applying; a real email address is
+# never committed to this public repo, so the placeholder below is deliberately not one (no "@").
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    email: REPLACE-WITH-YOUR-EMAIL-BEFORE-APPLYING
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - http01:
+          ingress:
+            ingressClassName: webapprouting.kubernetes.azure.com
