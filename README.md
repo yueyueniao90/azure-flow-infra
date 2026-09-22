@@ -85,7 +85,7 @@ It needs `AZFLOW_SUBSCRIPTION_ID` set (a dry run shows a placeholder instead).
 | `subscriptionId` | environment reference such as `"$AZFLOW_SUBSCRIPTION_ID"`, resolved when a script runs |
 | `location` | region of the resource group, cluster and registry (per stage, see below) |
 | `resourceGroup`, `cluster`, `registry`, `staticWebApp` | resource names; every stage uses its own |
-| `webHost`, `apiHost` | public hostnames of the stage; `webHost` is bound to the Static Web App as a custom domain (see "HTTPS" below), `apiHost` is used from step 7 on |
+| `webHost`, `apiHost` | public hostnames of the stage; `webHost` is bound to the Static Web App as a custom domain (see "HTTPS" below), `apiHost` is used by the AKS Ingress set up in the `azure-flow-api` repo (see "HTTPS") |
 | `nodeSize` | VM size of the single cluster node (extra key; the preflight recommends a value) |
 | `staticWebAppLocation` | Static Web Apps exist in only a few regions (`westeurope`, `centralus`, `eastus2`, `eastasia`, `westus2`), so this is separate from `location` (extra key) |
 | `shared` | `subscriptionId`, `resourceGroup`, `location`, `dnsZone` of the shared group that holds the DNS zone (extra key; must resolve to the same value in both files) |
