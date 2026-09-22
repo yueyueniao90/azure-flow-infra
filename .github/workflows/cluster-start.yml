@@ -1,0 +1,77 @@
+name: cluster-start
+
+# Manual: start the AKS cluster of a stage again after a stop (`az aks start`).
+# Each job binds its stage's GitHub environment, so the production run waits for the captain's approval.
+on:
+  workflow_dispatch:
+    inputs:
+      stage:
+        description: Which stage's cluster to start
+        type: choice
+        required: true
+        options:
+          - staging
+          - production
+          - both
+
+permissions: {}
+
+# Serialized with apply and destroy; never cancels a run that is going.
+concurrency:
+  group: azflow-infra
+  cancel-in-progress: false
+
+jobs:
+  start-staging:
+    if: inputs.stage == 'staging' || inputs.stage == 'both'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write # Azure OIDC login
+    env:
+      AZFLOW_SUBSCRIPTION_ID: ${{ vars.AZFLOW_STAGING_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Azure login (staging infra identity)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZFLOW_STAGING_CLIENT_ID }}
+          tenant-id: ${{ vars.AZFLOW_TENANT_ID }}
+          subscription-id: ${{ vars.AZFLOW_STAGING_SUBSCRIPTION_ID }}
+
+      - name: Start the staging cluster
+        run: |
+          echo "### Cluster start: staging" >> "$GITHUB_STEP_SUMMARY"
+          bash ci/stage.sh aks start staging
+
+  start-production:
+    if: inputs.stage == 'production' || inputs.stage == 'both'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: production # required reviewer: the run pauses here until approved
+    permissions:
+      contents: read
+      id-token: write # Azure OIDC login
+    env:
+      AZFLOW_SUBSCRIPTION_ID: ${{ vars.AZFLOW_PRODUCTION_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Azure login (production infra identity)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZFLOW_PRODUCTION_CLIENT_ID }}
+          tenant-id: ${{ vars.AZFLOW_TENANT_ID }}
+          subscription-id: ${{ vars.AZFLOW_PRODUCTION_SUBSCRIPTION_ID }}
+
+      - name: Start the production cluster
+        run: |
+          echo "### Cluster start: production" >> "$GITHUB_STEP_SUMMARY"
+          bash ci/stage.sh aks start production

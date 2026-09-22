@@ -1,0 +1,102 @@
+name: apply
+
+# Applies the infrastructure: staging first, then production once the captain approves the `production` environment
+# (required reviewer, see bootstrap/github-environments.sh). Runs after a merge to main that touches bicep/ or stages/,
+# or by hand from main. Each job signs in with that stage's infra identity through OIDC; there are no stored credentials.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bicep/**"
+      - "stages/**"
+  workflow_dispatch:
+
+permissions: {}
+
+# One infra run at a time, shared with the destroy, stop and start workflows. A run that is already going, including one
+# waiting for the production approval, is never cancelled; a newer queued run replaces an older queued one.
+concurrency:
+  group: azflow-infra
+  cancel-in-progress: false
+
+jobs:
+  apply-staging:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write # Azure OIDC login
+    env:
+      AZFLOW_TENANT_ID: ${{ vars.AZFLOW_TENANT_ID }}
+      AZFLOW_CLIENT_ID: ${{ vars.AZFLOW_STAGING_CLIENT_ID }}
+      AZFLOW_SUBSCRIPTION_ID: ${{ vars.AZFLOW_STAGING_SUBSCRIPTION_ID }}
+      AZFLOW_NAME_SUFFIX: ${{ vars.AZFLOW_NAME_SUFFIX }}
+      AZFLOW_API_PRINCIPAL_ID: ${{ vars.AZFLOW_STAGING_API_PRINCIPAL_ID }}
+      AZFLOW_WEB_PRINCIPAL_ID: ${{ vars.AZFLOW_STAGING_WEB_PRINCIPAL_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check that the seed has run
+        run: |
+          missing="$(bash ci/stage.sh missing-vars AZFLOW_TENANT_ID AZFLOW_CLIENT_ID AZFLOW_SUBSCRIPTION_ID | paste -sd, - | sed 's/,/, /g')"
+          if [ -n "$missing" ]; then
+            echo "::error::Repository variables written by bootstrap/seed.sh are missing (staging: $missing). Run the seed first, see README, First-run order."
+            exit 1
+          fi
+
+      - name: Install Bicep
+        run: az bicep install
+
+      - name: Azure login (staging infra identity)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZFLOW_STAGING_CLIENT_ID }}
+          tenant-id: ${{ vars.AZFLOW_TENANT_ID }}
+          subscription-id: ${{ vars.AZFLOW_STAGING_SUBSCRIPTION_ID }}
+
+      - name: Deploy staging
+        run: bash ci/stage.sh apply staging
+
+  apply-production:
+    needs: apply-staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: production # required reviewer: the run pauses here until approved
+    permissions:
+      contents: read
+      id-token: write # Azure OIDC login
+    env:
+      AZFLOW_TENANT_ID: ${{ vars.AZFLOW_TENANT_ID }}
+      AZFLOW_CLIENT_ID: ${{ vars.AZFLOW_PRODUCTION_CLIENT_ID }}
+      AZFLOW_SUBSCRIPTION_ID: ${{ vars.AZFLOW_PRODUCTION_SUBSCRIPTION_ID }}
+      AZFLOW_NAME_SUFFIX: ${{ vars.AZFLOW_NAME_SUFFIX }}
+      AZFLOW_API_PRINCIPAL_ID: ${{ vars.AZFLOW_PRODUCTION_API_PRINCIPAL_ID }}
+      AZFLOW_WEB_PRINCIPAL_ID: ${{ vars.AZFLOW_PRODUCTION_WEB_PRINCIPAL_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check that the seed has run
+        run: |
+          missing="$(bash ci/stage.sh missing-vars AZFLOW_TENANT_ID AZFLOW_CLIENT_ID AZFLOW_SUBSCRIPTION_ID | paste -sd, - | sed 's/,/, /g')"
+          if [ -n "$missing" ]; then
+            echo "::error::Repository variables written by bootstrap/seed.sh are missing (production: $missing). Run the seed first, see README, First-run order."
+            exit 1
+          fi
+
+      - name: Install Bicep
+        run: az bicep install
+
+      - name: Azure login (production infra identity)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZFLOW_PRODUCTION_CLIENT_ID }}
+          tenant-id: ${{ vars.AZFLOW_TENANT_ID }}
+          subscription-id: ${{ vars.AZFLOW_PRODUCTION_SUBSCRIPTION_ID }}
+
+      - name: Deploy production
+        run: bash ci/stage.sh apply production

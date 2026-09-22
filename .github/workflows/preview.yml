@@ -1,0 +1,109 @@
+name: preview
+
+# Shows what the Bicep in a pull request would change: `az deployment group what-if` per stage, in the job summary and
+# in one pull-request comment that is updated in place. Same-repository pull requests only: a fork gets no OIDC token,
+# so the Azure job is skipped for it. The identity is read-only (Reader plus the what-if custom role), see README.
+on:
+  pull_request:
+    paths:
+      - "bicep/**"
+      - "stages/**"
+
+permissions: {}
+
+concurrency:
+  group: preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  what-if:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # Azure OIDC login
+      pull-requests: write # the preview comment
+    env:
+      AZFLOW_TENANT_ID: ${{ vars.AZFLOW_TENANT_ID }}
+      AZFLOW_PREVIEW_CLIENT_ID: ${{ vars.AZFLOW_PREVIEW_CLIENT_ID }}
+      AZFLOW_STAGING_SUBSCRIPTION_ID: ${{ vars.AZFLOW_STAGING_SUBSCRIPTION_ID }}
+      AZFLOW_PRODUCTION_SUBSCRIPTION_ID: ${{ vars.AZFLOW_PRODUCTION_SUBSCRIPTION_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check that the seed has run
+        id: config
+        run: |
+          set -euo pipefail
+          preview="$RUNNER_TEMP/preview.md"
+          missing="$(bash ci/stage.sh missing-vars AZFLOW_TENANT_ID AZFLOW_PREVIEW_CLIENT_ID AZFLOW_STAGING_SUBSCRIPTION_ID AZFLOW_PRODUCTION_SUBSCRIPTION_ID | paste -sd, - | sed 's/,/, /g')"
+          {
+            echo "## Infrastructure preview (what-if)"
+            echo
+          } > "$preview"
+          if [ -z "$missing" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "No preview yet: the repository variables written by \`bootstrap/seed.sh\` are missing ($missing). Run the seed first (README, \"First-run order\")." >> "$preview"
+          fi
+
+      - name: Install Bicep
+        if: steps.config.outputs.ready == 'true'
+        run: az bicep install
+
+      - name: Azure login (read-only preview identity)
+        if: steps.config.outputs.ready == 'true'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZFLOW_PREVIEW_CLIENT_ID }}
+          tenant-id: ${{ vars.AZFLOW_TENANT_ID }}
+          subscription-id: ${{ vars.AZFLOW_STAGING_SUBSCRIPTION_ID }}
+
+      - name: What-if staging
+        if: steps.config.outputs.ready == 'true'
+        env:
+          AZFLOW_SUBSCRIPTION_ID: ${{ vars.AZFLOW_STAGING_SUBSCRIPTION_ID }}
+          AZFLOW_NAME_SUFFIX: ${{ vars.AZFLOW_NAME_SUFFIX }}
+          AZFLOW_API_PRINCIPAL_ID: ${{ vars.AZFLOW_STAGING_API_PRINCIPAL_ID }}
+          AZFLOW_WEB_PRINCIPAL_ID: ${{ vars.AZFLOW_STAGING_WEB_PRINCIPAL_ID }}
+        run: bash ci/stage.sh what-if staging >> "$RUNNER_TEMP/preview.md"
+
+      - name: What-if production
+        if: ${{ !cancelled() && steps.config.outputs.ready == 'true' }}
+        env:
+          AZFLOW_SUBSCRIPTION_ID: ${{ vars.AZFLOW_PRODUCTION_SUBSCRIPTION_ID }}
+          AZFLOW_NAME_SUFFIX: ${{ vars.AZFLOW_NAME_SUFFIX }}
+          AZFLOW_API_PRINCIPAL_ID: ${{ vars.AZFLOW_PRODUCTION_API_PRINCIPAL_ID }}
+          AZFLOW_WEB_PRINCIPAL_ID: ${{ vars.AZFLOW_PRODUCTION_WEB_PRINCIPAL_ID }}
+        run: bash ci/stage.sh what-if production >> "$RUNNER_TEMP/preview.md"
+
+      - name: Job summary
+        if: ${{ !cancelled() }}
+        run: cat "$RUNNER_TEMP/preview.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Pull request comment
+        if: ${{ !cancelled() }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- azflow-infra-preview -->';
+            const max = 60000; // comment limit is 65536 characters
+            let text = fs.readFileSync(`${process.env.RUNNER_TEMP}/preview.md`, 'utf8');
+            if (text.length > max) {
+              text = text.slice(0, max) + '\n\n_Output truncated: see the job summary for the full preview._';
+            }
+            const body = `${marker}\n${text}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+            const existing = comments.find((c) => c.user.type === 'Bot' && c.body && c.body.startsWith(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }
