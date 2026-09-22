@@ -7,7 +7,7 @@
   "registry": "acrazflowstaging",
   "staticWebApp": "swa-azflow-staging",
   "staticWebAppLocation": "westeurope",
-  "nodeSize": "Standard_B2s",
+  "nodeSize": "Standard_B2s_v2",
   "webHost": "staging.demo.zzll.de",
   "apiHost": "api-staging.demo.zzll.de",
   "shared": {

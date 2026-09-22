@@ -98,8 +98,10 @@ run the seed again. The `.bicepparam` files read the shared group's subscription
 `shared.subscriptionId` names; both stage files must resolve it to the same value (preflight and the seed check this).
 The deployment itself targets whichever subscription the pipeline (or `az --subscription`) selects.
 
-`location` is a per-stage setting on purpose: the free trial allows 4 vCPU per region, so one 2-vCPU node per
-cluster only fits when the two stages are in different regions (staging `westeurope`, production `germanywestcentral`).
+`location` is a per-stage setting on purpose: it lets staging and production use different regions if a
+subscription's per-region quota or VM-size availability requires it. Both stages currently use `westeurope` with
+`nodeSize` `Standard_B2s_v2`; together their two 2-vCPU nodes consume this account's full 4-vCPU free allowance for
+that VM family in that region, leaving no headroom for a third node there.
 
 ### Naming scheme
 
