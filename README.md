@@ -12,7 +12,8 @@ the manual workflows that stop, start and destroy the demo so it does not run up
 ```
 stages/            per-stage settings (staging.json, production.json)
 bicep/             main.bicep (stage entry point), staging/production .bicepparam, modules/ (one per resource kind)
-bootstrap/         preflight.sh (read-only checks), seed.sh (one-time setup), github-environments.sh, lib.sh (shared)
+bootstrap/         preflight.sh (read-only checks), seed.sh (one-time setup), github-environments.sh, lib.sh (shared),
+                   cert-manager/ (manual TLS bootstrap for AKS, see "HTTPS")
 ci/                stage.sh: the logic the workflows call, testable offline against the fake `az`
 .github/workflows/ checks, preview, apply, cluster-stop, cluster-start, destroy (see "The pipeline" below)
 tests/             offline test suite: tests/run.sh
@@ -26,6 +27,7 @@ tests/             offline test suite: tests/run.sh
 | [GitHub CLI](https://cli.github.com/) (`gh`), authenticated | seed writes repository variables (optional: otherwise it prints them); `bootstrap/github-environments.sh` needs admin rights on the repository |
 | `jq` | preflight, seed, github-environments, tests |
 | `shellcheck`, the Bicep CLI (standalone [`bicep`](https://aka.ms/bicep-install) or `az bicep`), [`actionlint`](https://github.com/rhysd/actionlint) | tests only |
+| [Helm](https://helm.sh/docs/intro/install/), `kubectl` | the captain's manual cert-manager bootstrap only (`bootstrap/cert-manager/README.md`, see "HTTPS"); no pipeline or test needs them |
 
 You need to be able to create app registrations in your Entra tenant and to assign roles on the subscription
 (Owner of the subscription is enough). The scripts also run on the macOS default bash (3.2).
@@ -83,7 +85,7 @@ It needs `AZFLOW_SUBSCRIPTION_ID` set (a dry run shows a placeholder instead).
 | `subscriptionId` | environment reference such as `"$AZFLOW_SUBSCRIPTION_ID"`, resolved when a script runs |
 | `location` | region of the resource group, cluster and registry (per stage, see below) |
 | `resourceGroup`, `cluster`, `registry`, `staticWebApp` | resource names; every stage uses its own |
-| `webHost`, `apiHost` | public hostnames of the stage (used from step 7 on) |
+| `webHost`, `apiHost` | public hostnames of the stage; `webHost` is bound to the Static Web App as a custom domain (see "HTTPS" below), `apiHost` is used by the AKS Ingress set up in the `azure-flow-api` repo (see "HTTPS") |
 | `nodeSize` | VM size of the single cluster node (extra key; the preflight recommends a value) |
 | `staticWebAppLocation` | Static Web Apps exist in only a few regions (`westeurope`, `centralus`, `eastus2`, `eastasia`, `westus2`), so this is separate from `location` (extra key) |
 | `shared` | `subscriptionId`, `resourceGroup`, `location`, `dnsZone` of the shared group that holds the DNS zone (extra key; must resolve to the same value in both files) |
@@ -132,7 +134,7 @@ variables). Empty means the corresponding role assignments are skipped.
 | `registry.bicep` | Container Registry, Basic tier, admin user off | AcrPush for the api identity |
 | `aks.bicep` | AKS, free control plane, one node, no autoscaler, no add-ons except managed application routing (ingress), Entra-only access | Cluster User Role and RBAC Writer for the api identity |
 | `registry-pull.bicep` | | AcrPull for the cluster's kubelet identity on the stage registry |
-| `static-web-app.bicep` | Static Web App, Free plan | Contributor on the Static Web App resource only, for the web identity |
+| `static-web-app.bicep` | Static Web App, Free plan, plus a `customDomains` child resource binding `webHost` (`dns-txt-token` validation; see "HTTPS" below) | Contributor on the Static Web App resource only, for the web identity |
 | `dns-zone.bicep` | Azure DNS zone in the shared group (both stages declare it identically) | DNS Zone Contributor for the api identity (it writes its own A record) |
 
 The cluster has local accounts disabled and uses Azure RBAC for Kubernetes, so there is no static kubeconfig to leak.
@@ -195,7 +197,7 @@ offline against a fake `az` (`tests/test_ci.sh`) instead of only being provable 
 | --- | --- | --- |
 | `checks.yml` | every pull request, every push to `main` | `tests/run.sh` (shellcheck, Bicep build/lint, the bash suites) plus `actionlint`. No Azure login. |
 | `preview.yml` | pull requests that touch `bicep/**` or `stages/**`, same-repository only | `az deployment group what-if` for each stage with the read-only preview identity (`AZFLOW_PREVIEW_CLIENT_ID`); posts the result to the job summary and to one pull-request comment it updates on every push. A fork pull request gets no Azure token, so the job skips cleanly. Before the seed has run (no resource group yet) it says so instead of failing. |
-| `apply.yml` | pushes to `main` touching `bicep/**` or `stages/**`, and manual dispatch | `apply-staging` deploys staging, then `apply-production` (needs `apply-staging`) deploys production. Each job uses the matching GitHub environment and identity. The job summary lists the DNS zone's name servers (for the Route 53 delegation, see below). |
+| `apply.yml` | pushes to `main` touching `bicep/**` or `stages/**`, and manual dispatch | `apply-staging` deploys staging, then `apply-production` (needs `apply-staging`) deploys production. Each job uses the matching GitHub environment and identity. After the Bicep deploy, each job also runs `ci/stage.sh dns-auth <stage>` (see "HTTPS" below). The job summary lists the DNS zone's name servers (for the Route 53 delegation, see below). |
 | `cluster-stop.yml` / `cluster-start.yml` | manual only | `az aks stop` / `az aks start` on one stage or both, so the cluster VM (the bulk of the cost) is not paying for idle time. |
 | `destroy.yml` | manual only | Deletes a stage's resources, and with `include_shared` the shared group (the DNS zone) too. See "Destroying the demo". |
 
@@ -275,7 +277,36 @@ its credit and its spending limit. Check the exact terms and remaining credit in
    would dangle, and anybody who creates a zone named `demo.zzll.de` in their own Azure account could then
    claim the subdomain and serve content under your domain (subdomain takeover).
 
-Hostname binding and HTTPS certificates are set up in step 7; until then the zone is empty.
+## HTTPS
+
+Two independent certificate stories, one per surface, chosen so that neither one needs a new Azure role
+or identity (see "Access model"). Both need the DNS delegation above to have propagated first.
+
+**Web (Static Web Apps): fully automatic.** `bicep/modules/static-web-app.bicep` declares a
+`Microsoft.Web/staticSites/customDomains` child resource for that stage's `webHost`, using
+`dns-txt-token` validation (proves ownership with a TXT record instead of pointing DNS at the app
+first). After each stage's Bicep deploy, `apply.yml` runs `ci/stage.sh dns-auth <stage>`, which reads
+the generated validation token back with `az staticwebapp hostname show ... --query validationToken`
+and writes it as `_dnsauth.<subdomain>.demo.zzll.de` in the shared zone, using the infra identity's
+existing DNS Zone Contributor grant there — no new role assignment. It is idempotent: once Azure has
+validated the domain the token comes back empty and the step is a no-op, so re-running `apply.yml`
+never writes a stale or duplicate record. Once validated, Static Web Apps issues and renews a free
+managed TLS certificate for the custom domain automatically; nothing further to do.
+
+**API (AKS): the certificate tool is installed by hand, once per cluster.** The API's Ingress uses
+cert-manager with Let's Encrypt's **HTTP-01** challenge (not DNS-01), because HTTP-01 needs no Azure
+credential at all — the ACME server just fetches a token over the ingress's already-public port 80.
+DNS-01 was ruled out here because it would need Azure Workload Identity (new cluster flags, a new Entra
+identity, and a widened RBAC condition) purely to enable wildcard certificates this project doesn't
+need. cert-manager's Helm chart installs cluster-scoped CRDs and ClusterRoles — comparable to
+cluster-admin — so no pipeline identity installs it: it is a **manual, one-time-per-cluster step the
+captain runs**, the same way `bootstrap/seed.sh` itself is captain-run, using the subscription-Owner
+access he already has. The full procedure, and the two checked-in `ClusterIssuer` YAMLs (Let's Encrypt
+staging server first, then production, for the rate-limit reasons explained there), live in
+[`bootstrap/cert-manager/README.md`](bootstrap/cert-manager/README.md) — this is the one place that
+procedure is documented; **must be re-run if a stage's cluster is ever destroyed and recreated.** The
+Ingress annotation itself (`cert-manager.io/cluster-issuer`, the `tls:` block) is a small change in the
+`azure-flow-api` repo, out of scope here.
 
 ## Tests
 
@@ -306,6 +337,12 @@ signs in or touches a subscription. Without either tool the suite fails with ins
 - Promoting an image from the staging registry to the production registry needs the production api identity to read
   the staging registry. That is a cross-stage grant this repo does not make; decide it in the api CD step.
 - `RBAC Writer` cannot create Kubernetes namespaces; the api deploys into an existing namespace (for example `default`).
+- The `customDomains` resource's `dns-txt-token` validation flow, and the exact time Azure takes to issue the managed
+  certificate after validation, are unproven against Azure; also unproven is whether `az staticwebapp hostname show`
+  really returns an empty `validationToken` once validated (the assumption `ci/stage.sh dns-auth`'s idempotence relies
+  on). The `webapprouting.kubernetes.azure.com` ingress class name in `bootstrap/cert-manager/*.yaml` is Microsoft's
+  documented name for the application-routing add-on; confirm it against the real add-on before the first
+  cert-manager bootstrap (see `bootstrap/cert-manager/README.md`).
 - DNS Zone Contributor for the api identity is zone-wide; it could be narrowed to record-set scope once the records exist.
 - A custom role for the infra identities could replace Contributor with an exact action list.
 - A production stage in its own subscription needs the seed run once more; cross-subscription paths are only exercised against the fake `az`, not a real second subscription.

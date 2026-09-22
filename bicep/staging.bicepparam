@@ -8,6 +8,7 @@ param clusterName = stage.cluster
 param registryName = '${stage.registry}${readEnvironmentVariable('AZFLOW_NAME_SUFFIX', '')}'
 param staticWebAppName = stage.staticWebApp
 param staticWebAppLocation = stage.staticWebAppLocation
+param webHost = stage.webHost
 param nodeSize = stage.nodeSize
 // The stage file holds a reference such as '$AZFLOW_SUBSCRIPTION_ID' (see README) or a plain value.
 var sharedSubscriptionRef = stage.shared.subscriptionId

@@ -156,6 +156,45 @@ assert_file_contains "production cluster" "$FAKE_AZ_STATE/calls.log" "aks stop -
 run_ci aks pause staging
 assert_eq "bad action" 2 "$RC"
 
+section "dns-auth: writes the domain-ownership TXT record when a validation token is pending"
+new_state
+seed_groups
+printf 'tok-abc123' >"$FAKE_AZ_STATE/swa-token.swa-azflow-staging.staging.demo.zzll.de"
+run_ci dns-auth staging
+assert_eq "exit code" 0 "$RC"
+assert_file_contains "reads back the token for the right hostname" "$FAKE_AZ_STATE/calls.log" \
+  "staticwebapp hostname show --name swa-azflow-staging --resource-group rg-azflow-staging --hostname staging.demo.zzll.de --subscription sub-test --query validationToken -o tsv"
+assert_file_contains "writes the record into the shared zone" "$FAKE_AZ_STATE/calls.log" \
+  "network dns record-set txt add-record --resource-group rg-azflow-shared --zone-name demo.zzll.de --subscription sub-test --record-set-name _dnsauth.staging --value tok-abc123"
+assert_eq "TXT value recorded once" "tok-abc123" "$(cat "$FAKE_AZ_STATE/txt.rg-azflow-shared.demo.zzll.de._dnsauth.staging")"
+assert_contains "summary names the record" "$(cat "$SUMMARY_FILE")" "_dnsauth.staging.demo.zzll.de"
+before="$(grep -c "record-set txt add-record" "$FAKE_AZ_STATE/calls.log")"
+run_ci dns-auth staging
+assert_eq "re-run is idempotent: exit code" 0 "$RC"
+assert_eq "re-run does not duplicate the TXT value" 1 "$(grep -c . "$FAKE_AZ_STATE/txt.rg-azflow-shared.demo.zzll.de._dnsauth.staging")"
+[ "$(grep -c "record-set txt add-record" "$FAKE_AZ_STATE/calls.log")" -gt "$before" ] && pass || fail "re-run did not call add-record again"
+
+section "dns-auth: already-validated domain needs no record"
+new_state
+seed_groups
+run_ci dns-auth staging
+assert_eq "exit code" 0 "$RC"
+assert_contains "says already validated" "$OUT" "already validated"
+assert_not_contains "no record write call" "$(cat "$FAKE_AZ_STATE/calls.log")" "record-set txt add-record"
+assert_contains "summary explains" "$(cat "$SUMMARY_FILE")" "already validated"
+
+section "dns-auth: production uses the production hostname and stage group"
+new_state
+seed_groups
+printf 'tok-prod' >"$FAKE_AZ_STATE/swa-token.swa-azflow-prod.app.demo.zzll.de"
+run_ci dns-auth production
+assert_eq "exit code" 0 "$RC"
+assert_file_contains "production record name" "$FAKE_AZ_STATE/calls.log" "--record-set-name _dnsauth.app --value tok-prod"
+
+section "dns-auth: unknown stage"
+run_ci dns-auth nowhere
+assert_eq "exit code" 2 "$RC"
+
 section "destroy"
 new_state
 seed_groups

@@ -10,6 +10,9 @@ param registryName string
 param staticWebAppName string
 param staticWebAppLocation string
 
+@description('Public hostname bound to this stage\'s Static Web App, e.g. "staging.demo.zzll.de".')
+param webHost string
+
 @description('VM size of the cluster node.')
 param nodeSize string
 
@@ -59,6 +62,7 @@ module staticWebApp 'modules/static-web-app.bicep' = {
     name: staticWebAppName
     location: staticWebAppLocation
     deployPrincipalId: webPrincipalId
+    customDomain: webHost
   }
 }
 

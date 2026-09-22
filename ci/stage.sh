@@ -7,6 +7,8 @@
 #   ci/stage.sh missing-vars <NAME>...      print the names of unset or empty variables (always exits 0)
 #   ci/stage.sh what-if <stage>             markdown preview of the stage deployment on stdout; non-zero if what-if failed
 #   ci/stage.sh apply <stage>               deploy bicep/main.bicep with bicep/<stage>.bicepparam; summary with name servers
+#   ci/stage.sh dns-auth <stage>            write the Static Web App custom domain's `_dnsauth.<host>` TXT record
+#                                            into the shared zone, if the domain is not already validated (idempotent)
 #   ci/stage.sh aks <stop|start> <stage>    switch the stage's cluster off or on (idempotent)
 #   ci/stage.sh destroy <stage> [--shared]  delete the stage resource group, and with --shared the shared one too
 #
@@ -22,7 +24,7 @@ SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 summary() { printf '%s\n' "$*" >>"$SUMMARY"; }
 
 usage() {
-  sed -n '3,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 need_stage() {
@@ -129,6 +131,39 @@ cmd_apply() {
   printf '%s' "$outputs" | jq -r '(.dnsNameServers.value // [])[]'
 }
 
+# The Static Web App custom domain (bicep/modules/static-web-app.bicep) uses dns-txt-token validation:
+# Azure generates a token that must be published as `_dnsauth.<host>` in the shared zone before it will
+# prove ownership and issue the managed certificate. Run right after `apply` deploys the customDomains
+# resource. Idempotent: once the domain is validated, Azure stops returning a token and this is a no-op.
+cmd_dns_auth() {
+  local stage="$1" site rg host shared_rg shared_sub zone subdomain record token
+  need_stage "$stage"
+  need_subscription
+  site="$(stage_get "$stage" .staticWebApp)"
+  rg="$(stage_get "$stage" .resourceGroup)"
+  host="$(stage_get "$stage" .webHost)"
+  shared_rg="$(stage_get "$stage" .shared.resourceGroup)"
+  shared_sub="$(shared_subscription "$stage")"
+  zone="$(stage_get "$stage" .shared.dnsZone)"
+  token="$(az staticwebapp hostname show --name "$site" --resource-group "$rg" --hostname "$host" \
+    --subscription "$AZFLOW_SUBSCRIPTION_ID" --query validationToken -o tsv)"
+  if [ -z "$token" ] || [ "$token" = "null" ]; then
+    log "Custom domain $host is already validated; no TXT record needed."
+    summary "- \`$stage\`: \`$host\` already validated, no domain-ownership TXT record needed."
+    return 0
+  fi
+  case "$host" in
+    "$zone") die "custom domain $host is the zone apex; this script only handles subdomain hosts." ;;
+    *".$zone") subdomain="${host%."$zone"}" ;;
+    *) die "custom domain $host is not a subdomain of zone $zone" ;;
+  esac
+  record="_dnsauth.$subdomain"
+  az network dns record-set txt add-record --resource-group "$shared_rg" --zone-name "$zone" \
+    --subscription "$shared_sub" --record-set-name "$record" --value "$token" >/dev/null
+  log "Wrote domain-ownership TXT record $record.$zone for $host."
+  summary "- \`$stage\`: wrote domain-ownership TXT record \`$record.$zone\` for \`$host\`."
+}
+
 cmd_aks() {
   local action="$1" stage="$2" state cluster rg
   case "$action" in stop | start) ;; *) die "aks: expected stop or start, got '$action'" ;; esac
@@ -205,7 +240,7 @@ main() {
   require_cmd jq "Install jq."
   case "$cmd" in
     missing-vars) cmd_missing_vars "$@" ;;
-    what-if | apply | destroy)
+    what-if | apply | dns-auth | destroy)
       [ $# -ge 1 ] || die "$cmd needs a stage (see --help)"
       "cmd_${cmd//-/_}" "$@"
       ;;

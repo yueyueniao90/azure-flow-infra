@@ -55,6 +55,7 @@ for st in staging production; do
   assert_eq "$st node size" "$(stage_get "$st" .nodeSize)" "$(printf '%s' "$p" | jq -r .nodeSize.value)"
   assert_eq "$st dns zone" "$(stage_get "$st" .shared.dnsZone)" "$(printf '%s' "$p" | jq -r .dnsZoneName.value)"
   assert_eq "$st shared rg" "$(stage_get "$st" .shared.resourceGroup)" "$(printf '%s' "$p" | jq -r .sharedResourceGroup.value)"
+  assert_eq "$st web host" "$(stage_get "$st" .webHost)" "$(printf '%s' "$p" | jq -r .webHost.value)"
   case "$(stage_get "$st" .staticWebAppLocation)" in
     westeurope | centralus | eastus2 | eastasia | westus2) pass ;;
     *) fail "$st staticWebAppLocation is not a Static Web Apps region" ;;
@@ -80,7 +81,7 @@ section "cost and security invariants of the compiled template"
 res="$(printf '%s' "$template" | jq -c '[.. | objects | select(has("type") and has("apiVersion")) | select(.type != "Microsoft.Resources/deployments")]')"
 q() { printf '%s' "$res" | jq -r "$1"; }
 types="$(q '[.[].type] | unique | .[]')"
-for t in Microsoft.ContainerRegistry/registries Microsoft.ContainerService/managedClusters Microsoft.Web/staticSites Microsoft.Network/dnsZones Microsoft.Authorization/roleAssignments; do
+for t in Microsoft.ContainerRegistry/registries Microsoft.ContainerService/managedClusters Microsoft.Web/staticSites Microsoft.Web/staticSites/customDomains Microsoft.Network/dnsZones Microsoft.Authorization/roleAssignments; do
   assert_contains "declares $t" "$types" "$t"
 done
 for t in Microsoft.KeyVault Microsoft.OperationalInsights Microsoft.Insights Microsoft.Monitor Microsoft.Compute Microsoft.Network/publicIPAddresses Microsoft.Network/loadBalancers Microsoft.Authorization/roleDefinitions; do
@@ -98,6 +99,10 @@ assert_eq "AKS node size is a parameter" "[parameters('nodeSize')]" "$(q '.[] | 
 assert_eq "registry is Basic" Basic "$(q '.[] | select(.type == "Microsoft.ContainerRegistry/registries") | .sku.name')"
 assert_eq "registry admin user off" false "$(q '.[] | select(.type == "Microsoft.ContainerRegistry/registries") | .properties.adminUserEnabled')"
 assert_eq "static web app is Free" Free "$(q '.[] | select(.type == "Microsoft.Web/staticSites") | .sku.name')"
+assert_eq "custom domain binding uses dns-txt-token (no CNAME cutover required)" "dns-txt-token" \
+  "$(q '.[] | select(.type == "Microsoft.Web/staticSites/customDomains") | .properties.validationMethod')"
+assert_eq "custom domain name comes from the webHost parameter" "[format('{0}/{1}', parameters('name'), parameters('customDomain'))]" \
+  "$(q '.[] | select(.type == "Microsoft.Web/staticSites/customDomains") | .name')"
 
 section "role assignments are narrow and covered by the seed's RBAC condition"
 assigned="$(grep -hoE "RoleId = '[0-9a-f-]{36}'" modules/*.bicep | grep -oE "[0-9a-f-]{36}" | sort -u)"

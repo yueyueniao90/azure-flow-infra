@@ -105,6 +105,8 @@ assert_contains "production environment" "$ap" "environment: production"
 assert_contains "production waits for staging" "$ap" "needs: apply-staging"
 assert_contains "applies staging" "$as" "ci/stage.sh apply staging"
 assert_contains "applies production" "$ap" "ci/stage.sh apply production"
+assert_contains "staging domain-ownership TXT record" "$as" "ci/stage.sh dns-auth staging"
+assert_contains "production domain-ownership TXT record" "$ap" "ci/stage.sh dns-auth production"
 for v in AZFLOW_NAME_SUFFIX AZFLOW_API_PRINCIPAL_ID AZFLOW_WEB_PRINCIPAL_ID AZFLOW_SUBSCRIPTION_ID; do
   assert_contains "$v passed to staging" "$as" "      $v:"
   assert_contains "$v passed to production" "$ap" "      $v:"
