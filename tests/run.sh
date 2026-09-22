@@ -19,7 +19,7 @@ step() {
   "$@" || failed=1
 }
 
-# shellcheck disable=SC2329  # called through step
+# shellcheck disable=SC2329,SC2317  # called through step
 shellcheck_all() {
   if ! command -v shellcheck >/dev/null 2>&1; then
     if [ "${AZFLOW_SKIP_SHELLCHECK:-0}" = 1 ]; then
