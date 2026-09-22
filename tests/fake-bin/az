@@ -30,6 +30,44 @@ fail() {
   exit "${2:-1}"
 }
 
+# The real Azure API error text for a malformed --condition, verbatim, so scripts under test see the
+# same string a real `az role assignment create` would print.
+fail_invalid_condition() {
+  printf '(InvalidCreateOrUpdateRoleAssignmentRequest) The given role assignment condition is invalid.\nCode: InvalidCreateOrUpdateRoleAssignmentRequest\nMessage: The given role assignment condition is invalid. (fake az: %s)\n' "$1" >&2
+  exit 1
+}
+
+# validate_condition <condition string>: a deliberately minimal sanity check on the Azure ABAC
+# condition grammar built by bootstrap/seed.sh's rbac_condition() -- NOT a full ABAC parser. It exists
+# only to catch the mistake this project actually shipped (an unquoted ActionMatches{...} action name)
+# and the two other shapes in that same string a copy-paste of it could break: unbalanced parentheses
+# and a malformed GuidEquals {...} list. It does not validate attribute names, operators, string
+# literals elsewhere in the condition, or that the referenced roles/actions exist -- real Azure is the
+# source of truth for that. Extend it only when a new real-world condition-string mistake needs catching.
+validate_condition() {
+  local c="$1" opens closes lists list body
+  # Every ActionMatches{...} must hold a single-quoted string literal: ActionMatches{'a/b/c'}.
+  printf '%s' "$c" | grep -Eq "ActionMatches\{[^']" &&
+    fail_invalid_condition "ActionMatches{...} action name must be a single-quoted string literal"
+  opens="$(printf '%s' "$c" | tr -cd '(' | wc -c | tr -d ' ')"
+  closes="$(printf '%s' "$c" | tr -cd ')' | wc -c | tr -d ' ')"
+  [ "$opens" = "$closes" ] || fail_invalid_condition "unbalanced parentheses ($opens open, $closes close)"
+  lists="$(printf '%s' "$c" | grep -oE 'GuidEquals ?\{[^}]*\}')"
+  if [ -n "$lists" ]; then
+    while IFS= read -r list; do
+      [ -n "$list" ] || continue
+      body="${list#GuidEquals}"
+      body="${body# }"
+      body="${body#\{}"
+      body="${body%\}}"
+      printf '%s' "$body" | grep -Eq '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(, [0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})*$' ||
+        fail_invalid_condition "malformed GuidEquals {...} list: '$body'"
+    done <<EOF
+$lists
+EOF
+  fi
+}
+
 cmd="${1:-} ${2:-}"
 sub3="${3:-}"
 
@@ -158,7 +196,15 @@ case "$cmd" in
           fi
         fi
         [ "$(opt --assignee-principal-type "$@")" = "ServicePrincipal" ] || fail "role create must pass --assignee-principal-type ServicePrincipal" 96
-        has --condition "$@" && { [ "$(opt --condition-version "$@")" = "2.0" ] || fail "condition needs --condition-version 2.0" 95; }
+        if has --condition "$@"; then
+          [ "$(opt --condition-version "$@")" = "2.0" ] || fail "condition needs --condition-version 2.0" 95
+          cond_val="$(opt --condition "$@")"
+          # Test-only trigger: every attempt is rejected, regardless of the condition string, so
+          # tests/test_seed.sh can assert retry() fails fast on a permanent Azure rejection without
+          # depending on rbac_condition() actually being broken.
+          [ ! -f "$S/role-create-always-invalid-condition" ] || fail_invalid_condition "forced by test fixture"
+          validate_condition "$cond_val"
+        fi
         n="$(wc -l <"$S/roles.jsonl" 2>/dev/null | tr -d ' ')"
         jq -cn --arg id "ra-$((${n:-0} + 1))-$RANDOM" --arg o "$(opt --assignee-object-id "$@")" --arg r "$(opt --role "$@")" \
           --arg s "$(opt --scope "$@")" --arg c "$(opt --condition "$@")" \

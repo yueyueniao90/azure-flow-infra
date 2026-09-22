@@ -160,6 +160,12 @@ The web identity gets the built-in Contributor role, but only on its own Static 
 role ID could be verified offline). Because Bicep assigns it, Contributor is in the stage-group ABAC condition: an
 infra identity can hand Contributor to another principal within its own stage group, which is no more than it already
 holds there. The shared group's condition still allows DNS Zone Contributor only.
+The ABAC condition string (built by `bootstrap/seed.sh`'s `rbac_condition()`) quotes the action name inside
+`ActionMatches{...}` as a single-quoted string literal, e.g. `ActionMatches{'Microsoft.Authorization/roleAssignments/write'}`;
+Azure rejects an unquoted action name with `InvalidCreateOrUpdateRoleAssignmentRequest`. The `GuidEquals {...}`
+role IDs are bare, comma-separated GUIDs (no quotes). See Microsoft's
+[delegate-role-assignments-examples](https://learn.microsoft.com/azure/role-based-access-control/delegate-role-assignments-examples)
+for the reference grammar if this condition ever needs to change.
 Nothing is assigned at subscription scope, nobody is Owner, and there are no secrets: tokens are minted per run
 for a specific repository and branch or environment. Fork pull requests get no OIDC token. The production infra
 environment is protected by a required reviewer (configured with the pipeline in step 2), and only an approved
