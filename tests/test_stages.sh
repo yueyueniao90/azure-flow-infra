@@ -28,8 +28,8 @@ assert_eq "staging web host" "staging.demo.zzll.de" "$(stage_get staging .webHos
 assert_eq "staging api host" "api-staging.demo.zzll.de" "$(stage_get staging .apiHost)"
 assert_eq "production web host" "app.demo.zzll.de" "$(stage_get production .webHost)"
 assert_eq "production api host" "api.demo.zzll.de" "$(stage_get production .apiHost)"
-assert_eq "staging region" "westeurope" "$(stage_get staging .location)"
-assert_eq "production region" "westeurope" "$(stage_get production .location)"
+assert_eq "staging region" "swedencentral" "$(stage_get staging .location)"
+assert_eq "production region" "swedencentral" "$(stage_get production .location)"
 [ "$(stage_get staging .location)" = "$(stage_get production .location)" ] && pass || fail "stages share one region on purpose (both nodes fit within the trial's 4 vCPU per-region allowance)"
 
 section "subscription is an environment reference, never a value"
