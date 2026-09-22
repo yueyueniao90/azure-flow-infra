@@ -113,7 +113,7 @@ that VM family in that region, leaving no headroom for a third node there.
 | Static Web App | `swa-azflow-staging` | `swa-azflow-prod` |
 | web host | `staging.demo.zzll.de` | `app.demo.zzll.de` |
 | api host | `api-staging.demo.zzll.de` | `api.demo.zzll.de` |
-| region | `westeurope` | `germanywestcentral` |
+| region | `westeurope` | `westeurope` |
 
 Shared by both stages: resource group `rg-azflow-shared` holding the Azure DNS zone `demo.zzll.de`.
 
