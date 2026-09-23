@@ -104,6 +104,23 @@ assert_eq "custom domain binding uses dns-txt-token (no CNAME cutover required)"
 assert_eq "custom domain name comes from the webHost parameter" "[format('{0}/{1}', parameters('name'), parameters('customDomain'))]" \
   "$(q '.[] | select(.type == "Microsoft.Web/staticSites/customDomains") | .name')"
 
+section "role ids are the exact Azure built-in GUIDs"
+# A shape check cannot catch a typo: a well-formed but wrong GUID fails deployment with RoleDefinitionDoesNotExist.
+# Values from `az role definition list --name "<role name>"`.
+assert_eq "AcrPush" "8311e382-0749-4cb8-b61a-304f252e45ec" "$ROLE_ACR_PUSH"
+assert_eq "AcrPull" "7f951dda-4ed3-4680-a7ca-43fe172d538d" "$ROLE_ACR_PULL"
+assert_eq "Azure Kubernetes Service Cluster User Role" "4abbcc35-e782-43d8-92c5-2d3f1bd2253f" "$ROLE_AKS_CLUSTER_USER"
+assert_eq "Azure Kubernetes Service RBAC Writer" "a7ffa36f-339b-4b5c-8bdf-e2c188b2c0eb" "$ROLE_AKS_RBAC_WRITER"
+assert_eq "Contributor" "b24988ac-6180-42a0-ab88-20f7382dd24c" "$ROLE_CONTRIBUTOR"
+assert_eq "DNS Zone Contributor" "befefa01-2a29-4197-83a8-272ff33ce314" "$ROLE_DNS_ZONE_CONTRIBUTOR"
+for v in acrPushRoleId:ROLE_ACR_PUSH acrPullRoleId:ROLE_ACR_PULL clusterUserRoleId:ROLE_AKS_CLUSTER_USER \
+  rbacWriterRoleId:ROLE_AKS_RBAC_WRITER contributorRoleId:ROLE_CONTRIBUTOR dnsZoneContributorRoleId:ROLE_DNS_ZONE_CONTRIBUTOR; do
+  bicep_id="$(grep -hoE "var ${v%%:*} = '[0-9a-f-]{36}'" modules/*.bicep | grep -oE "[0-9a-f-]{36}")"
+  lib_var="${v#*:}"
+  lib_id="${!lib_var}"
+  assert_eq "bicep ${v%%:*} matches lib.sh ${v#*:}" "$lib_id" "$bicep_id"
+done
+
 section "role assignments are narrow and covered by the seed's RBAC condition"
 assigned="$(grep -hoE "RoleId = '[0-9a-f-]{36}'" modules/*.bicep | grep -oE "[0-9a-f-]{36}" | sort -u)"
 [ -n "$assigned" ] && pass || fail "no role ids found in modules"
