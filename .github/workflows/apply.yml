@@ -22,7 +22,7 @@ concurrency:
 jobs:
   apply-staging:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     environment: staging
     permissions:
       contents: read
@@ -66,7 +66,7 @@ jobs:
   apply-production:
     needs: apply-staging
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     environment: production # required reviewer: the run pauses here until approved
     permissions:
       contents: read

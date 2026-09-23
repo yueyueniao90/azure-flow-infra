@@ -52,6 +52,10 @@ Step 4 is the first real deployment. `apply.yml` deploys staging automatically, 
 the captain's approval (see "Approving a production apply" below). Until the seed (step 2) has run, `preview.yml`
 and `apply.yml` report a clear "run the seed first" message instead of failing; see "The pipeline".
 
+A stage's very first apply takes noticeably longer than later ones: the Static Web App's custom domain has to
+validate ownership against DNS once, which on a brand-new domain can take well over 45 minutes (each apply job
+allows 90). Later runs are fast, since a validated domain is not validated again.
+
 On a fresh subscription the preflight can not read quota or VM sizes because `Microsoft.Compute` is not registered
 yet. It then reports FAIL/UNKNOWN rows. Register the providers first (free, idempotent), then run the preflight again:
 
