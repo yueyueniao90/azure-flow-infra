@@ -19,7 +19,7 @@ run_preflight() { # sets OUT and RC
 
 section "healthy subscription: everything passes"
 new_state
-healthy_region westeurope
+healthy_region swedencentral
 healthy_region germanywestcentral
 run_preflight
 assert_eq "exit code" 0 "$RC"
@@ -37,9 +37,9 @@ bad="$(grep -vE '^(account show|provider show|vm list-usage|vm list-skus|acr che
 assert_eq "only whitelisted az commands" "" "$bad"
 assert_file_contains "uses --all so restricted sizes are visible" "$FAKE_AZ_STATE/calls.log" "--all"
 
-section "captain's case: B2*_v2 restricted in westeurope, configured size is one of them"
+section "captain's case: B2*_v2 restricted in swedencentral, configured size is one of them"
 new_state
-region_fixture westeurope 4 "standardBSFamily:4 standardBSv2Family:4 standardBASv2Family:4 standardDASv5Family:4" \
+region_fixture swedencentral 4 "standardBSFamily:4 standardBSv2Family:4 standardBASv2Family:4 standardDASv5Family:4" \
   Standard_B2s:2:4:standardBSFamily:NotAvailableForSubscription \
   Standard_B2s_v2:2:8:standardBSv2Family:NotAvailableForSubscription \
   Standard_B2as_v2:2:8:standardBASv2Family:NotAvailableForSubscription \
@@ -58,21 +58,21 @@ rm -rf "$tmp"
 
 section "no usable size in the region: suggests an alternative region"
 new_state
-region_fixture westeurope 4 "standardBSFamily:4" Standard_B2s:2:4:standardBSFamily:NotAvailableForSubscription
+region_fixture swedencentral 4 "standardBSFamily:4" Standard_B2s:2:4:standardBSFamily:NotAvailableForSubscription
 healthy_region germanywestcentral
 healthy_region northeurope
-run_preflight --stage staging --alt-regions "swedencentral northeurope"
+run_preflight --stage staging --alt-regions "westeurope northeurope"
 assert_eq "exit code" 1 "$RC"
-assert_contains "no candidate usable" "$OUT" "no candidate size is usable in westeurope"
+assert_contains "no candidate usable" "$OUT" "no candidate size is usable in swedencentral"
 assert_contains "alternative region" "$OUT" "region northeurope has Standard_B2s usable"
 
 section "quota: family quota exhausted and regional quota too small"
 new_state
-region_fixture westeurope 1 "standardBSFamily:0" Standard_B2s:2:4:standardBSFamily:none
+region_fixture swedencentral 1 "standardBSFamily:0" Standard_B2s:2:4:standardBSFamily:none
 healthy_region germanywestcentral
 run_preflight --stage staging --alt-regions ""
 assert_eq "exit code" 1 "$RC"
-assert_contains "regional quota fail" "$OUT" "[FAIL]    staging regional vCPU quota (westeurope)"
+assert_contains "regional quota fail" "$OUT" "[FAIL]    staging regional vCPU quota (swedencentral)"
 assert_contains "needs vs free" "$OUT" "needs 2, free 1"
 assert_contains "family quota verdict" "$OUT" "family quota"
 
@@ -89,7 +89,7 @@ assert_contains "registry unknown" "$OUT" "registry name"
 
 section "names: registry taken is a blocker, SWA query failure is only a warning"
 new_state
-healthy_region westeurope
+healthy_region swedencentral
 healthy_region germanywestcentral
 : >"$FAKE_AZ_STATE/acr-taken.acrazflowstaging"
 : >"$FAKE_AZ_STATE/rest-fails"
@@ -102,7 +102,7 @@ assert_contains "prod registry ok" "$OUT" "[PASS]    production registry name ac
 
 section "name suffix is used for the registry check"
 new_state
-healthy_region westeurope
+healthy_region swedencentral
 healthy_region germanywestcentral
 : >"$FAKE_AZ_STATE/acr-taken.acrazflowstaging"
 AZFLOW_NAME_SUFFIX=zz9 run_preflight
@@ -111,7 +111,7 @@ assert_contains "suffixed name checked" "$OUT" "acrazflowstagingzz9"
 
 section "existing resources of ours are not reported as taken"
 new_state
-healthy_region westeurope
+healthy_region swedencentral
 healthy_region germanywestcentral
 : >"$FAKE_AZ_STATE/acr-taken.acrazflowstaging"
 : >"$FAKE_AZ_STATE/acr-own.acrazflowstaging"

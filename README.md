@@ -100,9 +100,12 @@ run the seed again. The `.bicepparam` files read the shared group's subscription
 The deployment itself targets whichever subscription the pipeline (or `az --subscription`) selects.
 
 `location` is a per-stage setting on purpose: it lets staging and production use different regions if a
-subscription's per-region quota or VM-size availability requires it. Both stages currently use `westeurope` with
-`nodeSize` `Standard_B2s_v2`; together their two 2-vCPU nodes consume this account's full 4-vCPU free allowance for
-that VM family in that region, leaving no headroom for a third node there.
+subscription's per-region quota or VM-size availability requires it. Both stages currently share one region and
+`nodeSize` `Standard_B2s_v2` (the stage files are the source of truth for which); together their two 2-vCPU nodes
+consume this account's full 4-vCPU free allowance for that VM family in that region, leaving no headroom for a third
+node there. A region can also refuse new customers outright (`RequestDisallowedByAzure`, "not accepting new
+customers", https://aka.ms/locationineligible) — this only surfaces at deployment time, not in preflight's quota
+check, and applies to `staticWebAppLocation` as well, so move both fields when it happens.
 
 ### Naming scheme
 
@@ -114,7 +117,7 @@ that VM family in that region, leaving no headroom for a third node there.
 | Static Web App | `swa-azflow-staging` | `swa-azflow-prod` |
 | web host | `staging.demo.zzll.de` | `app.demo.zzll.de` |
 | api host | `api-staging.demo.zzll.de` | `api.demo.zzll.de` |
-| region | `westeurope` | `westeurope` |
+| region | `location` in `stages/staging.json` | `location` in `stages/production.json` |
 
 Shared by both stages: resource group `rg-azflow-shared` holding the Azure DNS zone `demo.zzll.de`.
 
@@ -150,7 +153,7 @@ To use `kubectl` yourself, give your user a role such as *Azure Kubernetes Servi
 | `azflow-infra-<stage>` | infra repo, environment `<stage>` | On its own stage group: Contributor, plus Role Based Access Control Administrator **limited by an ABAC condition** to assigning and removing only AcrPush, AcrPull, AKS Cluster User, AKS RBAC Writer, Contributor and DNS Zone Contributor. On the shared group (only the DNS zone lives there): Contributor, plus RBAC Administrator limited to DNS Zone Contributor. |
 | `azflow-web-<stage>` | `azure-flow-web`, branch `main` | Reader on its own stage group; Contributor on its own Static Web App resource only (from Bicep) |
 | `azflow-api-<stage>` | `azure-flow-api`, branch `main` | Reader on its own stage group; AcrPush, AKS Cluster User and RBAC Writer, DNS Zone Contributor on single resources (from Bicep) |
-| `azflow-infra-preview` | infra repo, `pull_request` | Reader plus the custom role `azflow-deployment-whatif` (only `deployments/whatIf/action` and deployment reads) on the stage groups and the shared group; role names are unique per tenant, so it is defined once, assignable to every group in every subscription |
+| `azflow-infra-preview` | infra repo, `pull_request` | Reader plus the custom role `azflow-deployment-whatif` (only `deployments/whatIf/action` and deployment reads; `ci/stage.sh` runs what-if with `--validation-level ProviderNoRbac` so no write permission is checked) on the stage groups and the shared group; role names are unique per tenant, so it is defined once, assignable to every group in every subscription |
 
 Why this is the least that works: the infra deployment writes a registry, a cluster, a Static Web App, a DNS zone
 and role assignments. Contributor on one resource group covers the writes but cannot grant access; the

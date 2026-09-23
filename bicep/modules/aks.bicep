@@ -14,7 +14,7 @@ param deployPrincipalId string = ''
 
 var nodeCount = 1
 var clusterUserRoleId = '4abbcc35-e782-43d8-92c5-2d3f1bd2253f'
-var rbacWriterRoleId = 'a7ffa36f-339b-4b5c-8bdf-e2c188b2c8ac'
+var rbacWriterRoleId = 'a7ffa36f-339b-4b5c-8bdf-e2c188b2c0eb'
 
 resource cluster 'Microsoft.ContainerService/managedClusters@2024-09-01' = {
   name: name
