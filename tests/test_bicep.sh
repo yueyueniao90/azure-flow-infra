@@ -113,6 +113,7 @@ assert_eq "Azure Kubernetes Service Cluster User Role" "4abbcc35-e782-43d8-92c5-
 assert_eq "Azure Kubernetes Service RBAC Writer" "a7ffa36f-339b-4b5c-8bdf-e2c188b2c0eb" "$ROLE_AKS_RBAC_WRITER"
 assert_eq "Contributor" "b24988ac-6180-42a0-ab88-20f7382dd24c" "$ROLE_CONTRIBUTOR"
 assert_eq "DNS Zone Contributor" "befefa01-2a29-4197-83a8-272ff33ce314" "$ROLE_DNS_ZONE_CONTRIBUTOR"
+assert_eq "Role Based Access Control Administrator" "f58310d9-a9f6-439a-9e8d-f62e7b41a168" "$ROLE_RBAC_ADMIN"
 for v in acrPushRoleId:ROLE_ACR_PUSH acrPullRoleId:ROLE_ACR_PULL clusterUserRoleId:ROLE_AKS_CLUSTER_USER \
   rbacWriterRoleId:ROLE_AKS_RBAC_WRITER contributorRoleId:ROLE_CONTRIBUTOR dnsZoneContributorRoleId:ROLE_DNS_ZONE_CONTRIBUTOR; do
   bicep_id="$(grep -hoE "var ${v%%:*} = '[0-9a-f-]{36}'" modules/*.bicep | grep -oE "[0-9a-f-]{36}")"
