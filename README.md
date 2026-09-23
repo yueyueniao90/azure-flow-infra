@@ -52,9 +52,13 @@ Step 4 is the first real deployment. `apply.yml` deploys staging automatically, 
 the captain's approval (see "Approving a production apply" below). Until the seed (step 2) has run, `preview.yml`
 and `apply.yml` report a clear "run the seed first" message instead of failing; see "The pipeline".
 
-A stage's very first apply takes noticeably longer than later ones: the Static Web App's custom domain has to
-validate ownership against DNS once, which on a brand-new domain can take well over 45 minutes (each apply job
-allows 90). Later runs are fast, since a validated domain is not validated again.
+A stage's very first apply takes longer than later ones, because the Static Web App's custom domain has to prove
+ownership through a DNS TXT record once. The deployment waits for that record, and the record needs a token that
+only exists after the deployment has started. So `ci/stage.sh apply` starts the deployment without waiting,
+writes the TXT record once the token can be read, then waits for the deployment to finish (see "HTTPS"). An
+earlier version wrote the record only after the deployment had finished, so the first apply stalled until the
+job timed out. The 90-minute job timeout is only a backstop for slow DNS propagation. Later runs skip this,
+since a validated domain is not validated again.
 
 On a fresh subscription the preflight can not read quota or VM sizes because `Microsoft.Compute` is not registered
 yet. It then reports FAIL/UNKNOWN rows. Register the providers first (free, idempotent), then run the preflight again:
@@ -219,7 +223,7 @@ offline against a fake `az` (`tests/test_ci.sh`) instead of only being provable 
 | --- | --- | --- |
 | `checks.yml` | every pull request, every push to `main` | `tests/run.sh` (shellcheck, Bicep build/lint, the bash suites) plus `actionlint`. No Azure login. |
 | `preview.yml` | pull requests that touch `bicep/**` or `stages/**`, same-repository only | `az deployment group what-if` for each stage with the read-only preview identity (`AZFLOW_PREVIEW_CLIENT_ID`); posts the result to the job summary and to one pull-request comment it updates on every push. A fork pull request gets no Azure token, so the job skips cleanly. Before the seed has run (no resource group yet) it says so instead of failing. |
-| `apply.yml` | pushes to `main` touching `bicep/**` or `stages/**`, and manual dispatch | `apply-staging` deploys staging, then `apply-production` (needs `apply-staging`) deploys production. Each job uses the matching GitHub environment and identity. After the Bicep deploy, each job also runs `ci/stage.sh dns-auth <stage>` (see "HTTPS" below). The job summary lists the DNS zone's name servers (for the Route 53 delegation, see below). |
+| `apply.yml` | pushes to `main` touching `bicep/**` or `stages/**`, and manual dispatch | `apply-staging` deploys staging, then `apply-production` (needs `apply-staging`) deploys production. Each job uses the matching GitHub environment and identity. The deploy writes the custom domain's TXT record while it runs, and each job then re-checks it with `ci/stage.sh dns-auth <stage>` (see "HTTPS" below). The job summary lists the DNS zone's name servers (for the Route 53 delegation, see below). |
 | `cluster-stop.yml` / `cluster-start.yml` | manual only | `az aks stop` / `az aks start` on one stage or both, so the cluster VM (the bulk of the cost) is not paying for idle time. |
 | `destroy.yml` | manual only | Deletes a stage's resources, and with `include_shared` the shared group (the DNS zone) too. See "Destroying the demo". |
 
@@ -307,12 +311,14 @@ or identity (see "Access model"). Both need the DNS delegation above to have pro
 **Web (Static Web Apps): fully automatic.** `bicep/modules/static-web-app.bicep` declares a
 `Microsoft.Web/staticSites/customDomains` child resource for that stage's `webHost`, using
 `dns-txt-token` validation (proves ownership with a TXT record instead of pointing DNS at the app
-first). After each stage's Bicep deploy, `apply.yml` runs `ci/stage.sh dns-auth <stage>`, which reads
-the generated validation token back with `az staticwebapp hostname show ... --query validationToken`
-and writes it as `_dnsauth.<subdomain>.demo.zzll.de` in the shared zone, using the infra identity's
-existing DNS Zone Contributor grant there — no new role assignment. It is idempotent: once Azure has
-validated the domain the token comes back empty and the step is a no-op, so re-running `apply.yml`
-never writes a stale or duplicate record. Once validated, Static Web Apps issues and renews a free
+first). The deployment does not finish until that record exists, and the token only exists once the deployment
+has created the customDomains resource. So `ci/stage.sh apply` starts the deployment with `--no-wait` and polls it.
+While the deployment runs, it reads the token back with `az staticwebapp hostname show ... --query validationToken`
+as soon as the token can be read and writes it as `_dnsauth.<subdomain>.demo.zzll.de` in the shared zone, using
+the infra identity's existing DNS Zone Contributor grant there — no new role assignment. The apply job then runs
+`ci/stage.sh dns-auth <stage>`, which does the same check once more. Both are idempotent: once Azure has
+validated the domain the token comes back empty and nothing is written, so re-running `apply.yml` never writes a
+stale or duplicate record. Once validated, Static Web Apps issues and renews a free
 managed TLS certificate for the custom domain automatically; nothing further to do.
 
 **API (AKS): the certificate tool is installed by hand, once per cluster.** The API's Ingress uses

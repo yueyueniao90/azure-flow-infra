@@ -6,7 +6,8 @@
 #
 #   ci/stage.sh missing-vars <NAME>...      print the names of unset or empty variables (always exits 0)
 #   ci/stage.sh what-if <stage>             markdown preview of the stage deployment on stdout; non-zero if what-if failed
-#   ci/stage.sh apply <stage>               deploy bicep/main.bicep with bicep/<stage>.bicepparam; summary with name servers
+#   ci/stage.sh apply <stage>               deploy bicep/main.bicep with bicep/<stage>.bicepparam, writing the custom
+#                                            domain's TXT record while it runs; summary with name servers
 #   ci/stage.sh dns-auth <stage>            write the Static Web App custom domain's `_dnsauth.<host>` TXT record
 #                                            into the shared zone, if the domain is not already validated (idempotent)
 #   ci/stage.sh aks <stop|start> <stage>    switch the stage's cluster off or on (idempotent)
@@ -14,6 +15,7 @@
 #
 # Environment: AZFLOW_SUBSCRIPTION_ID (subscription of the stage; the stage files reference it), and for apply and
 # what-if also AZFLOW_NAME_SUFFIX, AZFLOW_API_PRINCIPAL_ID, AZFLOW_WEB_PRINCIPAL_ID (read by bicep/*.bicepparam).
+# AZFLOW_POLL_SECONDS: how often apply polls the running deployment (default 20).
 # The job summary goes to $GITHUB_STEP_SUMMARY when set.
 set -euo pipefail
 # shellcheck source=bootstrap/lib.sh
@@ -24,7 +26,7 @@ SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 summary() { printf '%s\n' "$*" >>"$SUMMARY"; }
 
 usage() {
-  sed -n '3,17p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 need_stage() {
@@ -113,8 +115,14 @@ cmd_apply() {
     die "cluster $(stage_get "$stage" .cluster) is stopped and Azure rejects updates to a stopped cluster. Run the 'cluster-start' workflow for $stage, then re-run this deployment (it can be stopped again afterwards)."
   fi
   name="azflow-$stage-${GITHUB_RUN_ID:-manual}"
-  outputs="$(az deployment group create --name "$name" --resource-group "$rg" --subscription "$AZFLOW_SUBSCRIPTION_ID" \
-    --template-file "$AZFLOW_ROOT/bicep/main.bicep" --parameters "$AZFLOW_ROOT/bicep/$stage.bicepparam" \
+  # The customDomains resource only finishes once Azure sees the `_dnsauth.<host>` TXT record, and its validation
+  # token is only readable after the deployment has created that resource. A blocking create would wait for a record
+  # nobody writes yet, so start the deployment without waiting, write the record as soon as the token appears, then
+  # wait for the deployment to finish. The job's timeout-minutes is only a backstop for slow DNS propagation.
+  az deployment group create --name "$name" --resource-group "$rg" --subscription "$AZFLOW_SUBSCRIPTION_ID" \
+    --template-file "$AZFLOW_ROOT/bicep/main.bicep" --parameters "$AZFLOW_ROOT/bicep/$stage.bicepparam" --no-wait
+  wait_for_deployment "$stage" "$name"
+  outputs="$(az deployment group show --name "$name" --resource-group "$rg" --subscription "$AZFLOW_SUBSCRIPTION_ID" \
     --query properties.outputs -o json)"
   suffix_note=""
   [ -z "${AZFLOW_NAME_SUFFIX:-}" ] || suffix_note=" (name suffix \`$AZFLOW_NAME_SUFFIX\`)"
@@ -133,37 +141,73 @@ cmd_apply() {
   printf '%s' "$outputs" | jq -r '(.dnsNameServers.value // [])[]'
 }
 
-# The Static Web App custom domain (bicep/modules/static-web-app.bicep) uses dns-txt-token validation:
-# Azure generates a token that must be published as `_dnsauth.<host>` in the shared zone before it will
-# prove ownership and issue the managed certificate. Run right after `apply` deploys the customDomains
-# resource. Idempotent: once the domain is validated, Azure stops returning a token and this is a no-op.
-cmd_dns_auth() {
-  local stage="$1" site rg host shared_rg shared_sub zone subdomain record token
-  need_stage "$stage"
-  need_subscription
-  site="$(stage_get "$stage" .staticWebApp)"
+# Poll the deployment started by cmd_apply until it reaches a terminal state. While it runs, write the custom
+# domain's TXT record the moment its validation token becomes readable (before that the hostname lookup fails
+# because the customDomains resource does not exist yet, which is expected). Poll interval: AZFLOW_POLL_SECONDS.
+wait_for_deployment() { # <stage> <deployment name>
+  local stage="$1" name="$2" rg state token written=""
   rg="$(stage_get "$stage" .resourceGroup)"
+  log "Deployment $name started; waiting for it (and writing the custom-domain TXT record once its token appears)."
+  while :; do
+    state="$(az deployment group show --name "$name" --resource-group "$rg" --subscription "$AZFLOW_SUBSCRIPTION_ID" \
+      --query properties.provisioningState -o tsv)"
+    if [ -z "$written" ]; then
+      token="$(validation_token "$stage" 2>/dev/null || true)"
+      if [ -n "$token" ] && [ "$token" != "null" ]; then
+        write_dns_auth_record "$stage" "$token"
+        written=1
+      fi
+    fi
+    case "$state" in
+      Succeeded) return 0 ;;
+      Failed | Canceled)
+        warn "deployment $name ended $state:"
+        az deployment group show --name "$name" --resource-group "$rg" --subscription "$AZFLOW_SUBSCRIPTION_ID" \
+          --query properties.error -o json >&2 || true
+        return 1
+        ;;
+    esac
+    sleep "${AZFLOW_POLL_SECONDS:-20}"
+  done
+}
+
+validation_token() { # <stage>: the pending dns-txt-token, empty or "null" once the domain is validated
+  az staticwebapp hostname show --name "$(stage_get "$1" .staticWebApp)" --resource-group "$(stage_get "$1" .resourceGroup)" \
+    --hostname "$(stage_get "$1" .webHost)" --subscription "$AZFLOW_SUBSCRIPTION_ID" --query validationToken -o tsv
+}
+
+write_dns_auth_record() { # <stage> <token>: publish `_dnsauth.<host>` in the shared zone (add-record is idempotent)
+  local stage="$1" token="$2" host zone subdomain record
   host="$(stage_get "$stage" .webHost)"
-  shared_rg="$(stage_get "$stage" .shared.resourceGroup)"
-  shared_sub="$(shared_subscription "$stage")"
   zone="$(stage_get "$stage" .shared.dnsZone)"
-  token="$(az staticwebapp hostname show --name "$site" --resource-group "$rg" --hostname "$host" \
-    --subscription "$AZFLOW_SUBSCRIPTION_ID" --query validationToken -o tsv)"
-  if [ -z "$token" ] || [ "$token" = "null" ]; then
-    log "Custom domain $host is already validated; no TXT record needed."
-    summary "- \`$stage\`: \`$host\` already validated, no domain-ownership TXT record needed."
-    return 0
-  fi
   case "$host" in
     "$zone") die "custom domain $host is the zone apex; this script only handles subdomain hosts." ;;
     *".$zone") subdomain="${host%."$zone"}" ;;
     *) die "custom domain $host is not a subdomain of zone $zone" ;;
   esac
   record="_dnsauth.$subdomain"
-  az network dns record-set txt add-record --resource-group "$shared_rg" --zone-name "$zone" \
-    --subscription "$shared_sub" --record-set-name "$record" --value "$token" >/dev/null
+  az network dns record-set txt add-record --resource-group "$(stage_get "$stage" .shared.resourceGroup)" --zone-name "$zone" \
+    --subscription "$(shared_subscription "$stage")" --record-set-name "$record" --value "$token" >/dev/null
   log "Wrote domain-ownership TXT record $record.$zone for $host."
   summary "- \`$stage\`: wrote domain-ownership TXT record \`$record.$zone\` for \`$host\`."
+}
+
+# The Static Web App custom domain (bicep/modules/static-web-app.bicep) uses dns-txt-token validation: Azure
+# generates a token that must be published as `_dnsauth.<host>` in the shared zone before it proves ownership and
+# issues the managed certificate. `apply` already writes it while the deployment runs; this standalone command
+# re-checks afterwards. Idempotent: once the domain is validated, Azure stops returning a token and this is a no-op.
+cmd_dns_auth() {
+  local stage="$1" host token
+  need_stage "$stage"
+  need_subscription
+  host="$(stage_get "$stage" .webHost)"
+  token="$(validation_token "$stage")"
+  if [ -z "$token" ] || [ "$token" = "null" ]; then
+    log "Custom domain $host is already validated; no TXT record needed."
+    summary "- \`$stage\`: \`$host\` already validated, no domain-ownership TXT record needed."
+    return 0
+  fi
+  write_dns_auth_record "$stage" "$token"
 }
 
 cmd_aks() {
