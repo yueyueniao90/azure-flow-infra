@@ -82,8 +82,10 @@ cmd_what_if() {
     return 0
   fi
   rc=0
+  # ProviderNoRbac: the preview identity is read-only on purpose; the default validation level would also demand the
+  # write permissions a real deployment needs.
   out="$(az deployment group what-if --resource-group "$rg" --subscription "$AZFLOW_SUBSCRIPTION_ID" \
-    --template-file "$AZFLOW_ROOT/bicep/main.bicep" --parameters "$AZFLOW_ROOT/bicep/$stage.bicepparam" 2>&1)" || rc=$?
+    --validation-level ProviderNoRbac --template-file "$AZFLOW_ROOT/bicep/main.bicep" --parameters "$AZFLOW_ROOT/bicep/$stage.bicepparam" 2>&1)" || rc=$?
   out="$(printf '%s\n' "$out" | strip_ansi)"
   printf '%s\n' "$out" >&2
   if [ "$rc" -ne 0 ]; then

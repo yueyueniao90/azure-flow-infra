@@ -72,6 +72,7 @@ assert_contains "result in a code block" "$OUT" '```text'
 assert_contains "the what-if text" "$OUT" "Resource changes: 1 to create."
 case "$OUT" in *$'\033'*) fail "ANSI colour codes leaked into the markdown" ;; *) pass ;; esac
 assert_file_contains "what-if targets the stage group" "$FAKE_AZ_STATE/calls.log" "deployment group what-if --resource-group rg-azflow-staging --subscription sub-test"
+assert_file_contains "what-if skips RBAC write checks (preview identity is read-only)" "$FAKE_AZ_STATE/calls.log" "--validation-level ProviderNoRbac"
 assert_file_contains "parameters passed through" "$FAKE_AZ_STATE/deploy-env.log" "sub=sub-test suffix=sfx api=api-1 web=web-1"
 assert_not_contains "never deploys" "$(cat "$FAKE_AZ_STATE/calls.log")" "deployment group create"
 
