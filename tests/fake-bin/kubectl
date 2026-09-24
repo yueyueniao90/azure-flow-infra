@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Fake kubectl for the offline tests. Answers only `get service <name> --namespace <ns> -o jsonpath=...` and only with a
+# kubeconfig from the fake `az aks get-credentials` that the fake kubelogin converted to azurecli login.
+# State in $FAKE_AZ_STATE: ingress-ip (the Service's load-balancer IP; absent = still pending),
+# kubectl-forbidden-first (a count: that many calls fail Forbidden first, like a role assignment still propagating).
+set -u
+: "${FAKE_AZ_STATE:?FAKE_AZ_STATE must point at a test state directory}"
+S="$FAKE_AZ_STATE"
+printf '%s\n' "$*" >>"$S/kubectl-calls.log"
+kubeconfig="" ns="" out="" words=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --kubeconfig) kubeconfig="$2" && shift ;;
+    --namespace | -n) ns="$2" && shift ;;
+    -o) out="$2" && shift ;;
+    *) words="$words $1" ;;
+  esac
+  shift
+done
+[ -f "$kubeconfig" ] || {
+  echo "fake kubectl: pass --kubeconfig with the file az aks get-credentials wrote" >&2
+  exit 96
+}
+grep -qx 'login: azurecli' "$kubeconfig" || {
+  echo "fake kubectl: kubeconfig not converted with kubelogin --login azurecli; a CI run would prompt for a device code" >&2
+  exit 96
+}
+[ "$words" = " get service nginx" ] && [ "$ns" = app-routing-system ] || {
+  echo "fake kubectl: unsupported:$words (namespace '$ns')" >&2
+  exit 99
+}
+if [ -f "$S/kubectl-forbidden-first" ]; then
+  n="$(cat "$S/kubectl-forbidden-first")"
+  if [ "$n" -gt 0 ]; then
+    echo $((n - 1)) >"$S/kubectl-forbidden-first"
+    echo 'Error from server (Forbidden): services "nginx" is forbidden: User does not have access to the resource in Azure. Update role assignment to allow access.' >&2
+    exit 1
+  fi
+fi
+[ "$out" = 'jsonpath={.status.loadBalancer.ingress[0].ip}' ] || {
+  echo "fake kubectl: unsupported output format '$out'" >&2
+  exit 99
+}
+[ -f "$S/ingress-ip" ] && cat "$S/ingress-ip"
+exit 0

@@ -81,7 +81,7 @@ section "cost and security invariants of the compiled template"
 res="$(printf '%s' "$template" | jq -c '[.. | objects | select(has("type") and has("apiVersion")) | select(.type != "Microsoft.Resources/deployments")]')"
 q() { printf '%s' "$res" | jq -r "$1"; }
 types="$(q '[.[].type] | unique | .[]')"
-for t in Microsoft.ContainerRegistry/registries Microsoft.ContainerService/managedClusters Microsoft.Web/staticSites Microsoft.Web/staticSites/customDomains Microsoft.Network/dnsZones Microsoft.Authorization/roleAssignments; do
+for t in Microsoft.ContainerRegistry/registries Microsoft.ContainerService/managedClusters Microsoft.Web/staticSites Microsoft.Web/staticSites/customDomains Microsoft.Network/dnsZones Microsoft.Network/dnsZones/CNAME Microsoft.Authorization/roleAssignments; do
   assert_contains "declares $t" "$types" "$t"
 done
 for t in Microsoft.KeyVault Microsoft.OperationalInsights Microsoft.Insights Microsoft.Monitor Microsoft.Compute Microsoft.Network/publicIPAddresses Microsoft.Network/loadBalancers Microsoft.Authorization/roleDefinitions; do
@@ -104,6 +104,18 @@ assert_eq "custom domain binding uses dns-txt-token (no CNAME cutover required)"
 assert_eq "custom domain name comes from the webHost parameter" "[format('{0}/{1}', parameters('name'), parameters('customDomain'))]" \
   "$(q '.[] | select(.type == "Microsoft.Web/staticSites/customDomains") | .name')"
 
+section "the web host resolves: a CNAME to the Static Web App in the shared zone"
+cname_module="$(printf '%s' "$template" | jq -c '.resources[] | select(.type == "Microsoft.Resources/deployments" and (.properties.template.resources // [] | any(.type == "Microsoft.Network/dnsZones/CNAME")))')"
+[ -n "$cname_module" ] && pass || fail "no module declares the web host CNAME"
+cname_target="$(printf '%s' "$cname_module" | jq -r .properties.parameters.target.value)"
+assert_contains "CNAME target comes from the static-web-app module" "$cname_target" "'Microsoft.Resources/deployments', 'static-web-app')"
+assert_contains "CNAME target is the Static Web App's default hostname" "$cname_target" ".outputs.defaultHostname.value]"
+assert_eq "CNAME is deployed into the shared resource group" "[parameters('sharedResourceGroup')]" "$(printf '%s' "$cname_module" | jq -r .resourceGroup)"
+assert_eq "CNAME name is webHost relative to the zone" "[variables('webRecordName')]" "$(printf '%s' "$cname_module" | jq -r .properties.parameters.recordName.value)"
+assert_eq "webRecordName strips the zone and its dot" "[substring(parameters('webHost'), 0, sub(sub(length(parameters('webHost')), length(parameters('dnsZoneName'))), 1))]" \
+  "$(printf '%s' "$template" | jq -r .variables.webRecordName)"
+assert_eq "no A record in Bicep (the ingress IP is written by ci/stage.sh api-dns)" 0 "$(q '[.[] | select(.type == "Microsoft.Network/dnsZones/A")] | length')"
+
 section "role ids are the exact Azure built-in GUIDs"
 # A shape check cannot catch a typo: a well-formed but wrong GUID fails deployment with RoleDefinitionDoesNotExist.
 # Values from `az role definition list --name "<role name>"`.
@@ -111,6 +123,7 @@ assert_eq "AcrPush" "8311e382-0749-4cb8-b61a-304f252e45ec" "$ROLE_ACR_PUSH"
 assert_eq "AcrPull" "7f951dda-4ed3-4680-a7ca-43fe172d538d" "$ROLE_ACR_PULL"
 assert_eq "Azure Kubernetes Service Cluster User Role" "4abbcc35-e782-43d8-92c5-2d3f1bd2253f" "$ROLE_AKS_CLUSTER_USER"
 assert_eq "Azure Kubernetes Service RBAC Writer" "a7ffa36f-339b-4b5c-8bdf-e2c188b2c0eb" "$ROLE_AKS_RBAC_WRITER"
+assert_eq "Azure Kubernetes Service RBAC Reader" "7f6c6a51-bcf8-42ba-9220-52d62157d7db" "$ROLE_AKS_RBAC_READER"
 assert_eq "Contributor" "b24988ac-6180-42a0-ab88-20f7382dd24c" "$ROLE_CONTRIBUTOR"
 assert_eq "DNS Zone Contributor" "befefa01-2a29-4197-83a8-272ff33ce314" "$ROLE_DNS_ZONE_CONTRIBUTOR"
 assert_eq "Role Based Access Control Administrator" "f58310d9-a9f6-439a-9e8d-f62e7b41a168" "$ROLE_RBAC_ADMIN"
@@ -147,5 +160,9 @@ assert_eq "role assignments are scoped to a resource" 0 \
   "$(q '[.[] | select(.type == "Microsoft.Authorization/roleAssignments") | select((.scope // "") == "")] | length')"
 condition_ids="$(AZFLOW_SUBSCRIPTION_ID=s "$REPO_ROOT/bootstrap/seed.sh" --dry-run | grep 'azflow-infra-staging on .*rg-azflow-staging, limited')"
 for id in $assigned; do assert_contains "seed condition for stage rg allows $id" "$condition_ids" "$id"; done
+# ci/stage.sh assigns roles too (api-dns: AKS RBAC Reader on the ingress namespace); the same condition must allow them.
+ci_roles="$(grep -oE '\$ROLE_[A-Z_]+' "$REPO_ROOT/ci/stage.sh" | tr -d '$' | sort -u)"
+[ -n "$ci_roles" ] && pass || fail "no role constants found in ci/stage.sh"
+for v in $ci_roles; do assert_contains "seed condition for stage rg allows ci/stage.sh's $v" "$condition_ids" "${!v}"; done
 
 finish "bicep"
