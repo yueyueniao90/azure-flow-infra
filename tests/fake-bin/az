@@ -238,6 +238,37 @@ case "$cmd" in
     rm -f "$S/rg.$(opt --name "$@")"
     ;;
   "deployment group")
+    if [ "$sub3" = show ]; then
+      # State of a deployment started with `create --no-wait`. With $S/deploy-needs-txt it stays Running, like the
+      # real customDomains resource, until the `_dnsauth.<label>` TXT record holds the site's pending token; fixture
+      # names follow the stage files (swa-azflow-<x>, rg-azflow-<x>, zone demo.zzll.de in rg-azflow-shared).
+      rg="$(opt --resource-group "$@")"
+      f="$S/deployment.$rg.$(opt --name "$@")"
+      [ -f "$f" ] || fail "DeploymentNotFound" 3
+      polls=$(($(cat "$f") + 1))
+      echo "$polls" >"$f"
+      [ "$polls" -le 50 ] || fail "fake az: deployment polled 50 times without finishing" 95
+      state=Succeeded
+      if [ -e "$S/deploy-fails-async" ]; then
+        state=Failed
+      elif [ -e "$S/deploy-needs-txt" ]; then
+        for tok in "$S"/swa-token.*; do
+          [ -f "$tok" ] || continue
+          host="${tok#"$S"/swa-token.*.}"
+          txt="$S/txt.rg-azflow-shared.demo.zzll.de._dnsauth.${host%.demo.zzll.de}"
+          grep -qxF "$(cat "$tok")" "$txt" 2>/dev/null || state=Running
+        done
+      fi
+      case "$(opt --query "$@")" in
+        properties.provisioningState) echo "$state" ;;
+        properties.error) echo '{"code":"DeploymentFailed","message":"deployment failed"}' ;;
+        properties.outputs)
+          echo '{"registryLoginServer":{"type":"String","value":"acrfake.azurecr.io"},"staticWebAppDefaultHostname":{"type":"String","value":"fake.azurestaticapps.net"},"dnsNameServers":{"type":"Array","value":["ns1-01.azure-dns.com.","ns2-01.azure-dns.net.","ns3-01.azure-dns.org.","ns4-01.azure-dns.info."]}}'
+          ;;
+        *) fail "unsupported query: $*" 99 ;;
+      esac
+      exit 0
+    fi
     [ -f "$(opt --template-file "$@")" ] || fail "template file not found: $(opt --template-file "$@")" 92
     [ -f "$(opt --parameters "$@")" ] || fail "parameters file not found: $(opt --parameters "$@")" 92
     [ -e "$S/rg.$(opt --resource-group "$@")" ] || fail "ResourceGroupNotFound" 3
@@ -250,7 +281,8 @@ case "$cmd" in
         printf '\033[33mNote: The result may contain false positives.\033[0m\n\033[32m+ Create\033[0m\nResource changes: 1 to create.\n'
         ;;
       create)
-        echo '{"registryLoginServer":{"type":"String","value":"acrfake.azurecr.io"},"staticWebAppDefaultHostname":{"type":"String","value":"fake.azurestaticapps.net"},"dnsNameServers":{"type":"Array","value":["ns1-01.azure-dns.com.","ns2-01.azure-dns.net.","ns3-01.azure-dns.org.","ns4-01.azure-dns.info."]}}'
+        has --no-wait "$@" || fail "fake az: deployment create must use --no-wait (ci/stage.sh polls it)" 96
+        echo 0 >"$S/deployment.$(opt --resource-group "$@").$(opt --name "$@")"
         ;;
       *) fail "unsupported: $*" 99 ;;
     esac

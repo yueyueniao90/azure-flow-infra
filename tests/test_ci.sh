@@ -10,6 +10,7 @@ set -euo pipefail
 CI="$REPO_ROOT/ci/stage.sh"
 unset AZFLOW_NAME_SUFFIX AZFLOW_API_PRINCIPAL_ID AZFLOW_WEB_PRINCIPAL_ID GITHUB_STEP_SUMMARY || true
 export AZFLOW_SUBSCRIPTION_ID="sub-test"
+export AZFLOW_POLL_SECONDS=0
 
 # run_ci <args...>: sets OUT (stdout and stderr) and RC. The job summary lands in $SUMMARY_FILE.
 run_ci() {
@@ -94,6 +95,8 @@ echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
 AZFLOW_NAME_SUFFIX=sfx AZFLOW_API_PRINCIPAL_ID=api-1 AZFLOW_WEB_PRINCIPAL_ID=web-1 GITHUB_RUN_ID=77 run_ci apply staging
 assert_eq "exit code" 0 "$RC"
 assert_file_contains "deployment named per run" "$FAKE_AZ_STATE/calls.log" "deployment group create --name azflow-staging-77 --resource-group rg-azflow-staging --subscription sub-test"
+assert_file_contains "deployment started without blocking" "$FAKE_AZ_STATE/calls.log" "bicep/staging.bicepparam --no-wait"
+assert_file_contains "outputs read from the finished deployment" "$FAKE_AZ_STATE/calls.log" "deployment group show --name azflow-staging-77 --resource-group rg-azflow-staging --subscription sub-test --query properties.outputs"
 assert_file_contains "parameters passed through" "$FAKE_AZ_STATE/deploy-env.log" "sub=sub-test suffix=sfx api=api-1 web=web-1"
 summary="$(cat "$SUMMARY_FILE")"
 for ns in ns1-01.azure-dns.com. ns2-01.azure-dns.net. ns3-01.azure-dns.org. ns4-01.azure-dns.info.; do
@@ -122,6 +125,24 @@ echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
 run_ci apply staging
 assert_eq "a failed deployment fails the job" 1 "$(printf '%s' "$RC")"
 rm -f "$FAKE_AZ_STATE/deploy-fails"
+touch "$FAKE_AZ_STATE/deploy-fails-async"
+run_ci apply staging
+assert_eq "a deployment that fails after starting fails the job" 1 "$RC"
+assert_contains "shows the deployment error" "$OUT" "DeploymentFailed"
+rm -f "$FAKE_AZ_STATE/deploy-fails-async"
+
+section "apply writes the custom-domain TXT record while the deployment waits for it"
+new_state
+seed_groups
+echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
+touch "$FAKE_AZ_STATE/deploy-needs-txt"
+printf 'tok-live' >"$FAKE_AZ_STATE/swa-token.swa-azflow-staging.staging.demo.zzll.de"
+run_ci apply staging
+assert_eq "deployment finishes once the record exists" 0 "$RC"
+assert_eq "TXT record holds the token" "tok-live" "$(cat "$FAKE_AZ_STATE/txt.rg-azflow-shared.demo.zzll.de._dnsauth.staging")"
+assert_contains "summary names the record" "$(cat "$SUMMARY_FILE")" "_dnsauth.staging.demo.zzll.de"
+assert_contains "summary still lists name servers" "$(cat "$SUMMARY_FILE")" "ns1-01.azure-dns.com."
+assert_eq "record written once" 1 "$(grep -c "record-set txt add-record" "$FAKE_AZ_STATE/calls.log")"
 
 section "cluster stop and start"
 new_state
