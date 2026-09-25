@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Fake kubelogin for the offline tests: `convert-kubeconfig --login azurecli --kubeconfig <file>` marks the kubeconfig
+# written by the fake `az aks get-credentials` as converted. Anything else fails loudly (exit 99).
+set -u
+: "${FAKE_AZ_STATE:?FAKE_AZ_STATE must point at a test state directory}"
+printf '%s\n' "$*" >>"$FAKE_AZ_STATE/kubelogin-calls.log"
+[ "${1:-}" = convert-kubeconfig ] || {
+  echo "fake kubelogin: unsupported: $*" >&2
+  exit 99
+}
+login="" file=""
+shift
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -l | --login) login="${2:-}" ;;
+    --kubeconfig) file="${2:-}" ;;
+  esac
+  shift
+done
+[ "$login" = azurecli ] || {
+  echo "fake kubelogin: the pipeline signs in through az (--login azurecli), got '$login'" >&2
+  exit 96
+}
+[ -f "$file" ] || {
+  echo "fake kubelogin: kubeconfig '$file' not found" >&2
+  exit 1
+}
+sed 's/^login: .*/login: azurecli/' "$file" >"$file.tmp" && mv "$file.tmp" "$file"

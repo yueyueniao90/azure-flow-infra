@@ -36,6 +36,8 @@ ROLE_ACR_PUSH="8311e382-0749-4cb8-b61a-304f252e45ec"
 ROLE_ACR_PULL="7f951dda-4ed3-4680-a7ca-43fe172d538d"
 ROLE_AKS_CLUSTER_USER="4abbcc35-e782-43d8-92c5-2d3f1bd2253f"
 ROLE_AKS_RBAC_WRITER="a7ffa36f-339b-4b5c-8bdf-e2c188b2c0eb"
+# Not assigned by Bicep: ci/stage.sh api-dns grants it to the infra identity on one namespace (README, "Access model").
+ROLE_AKS_RBAC_READER="7f6c6a51-bcf8-42ba-9220-52d62157d7db"
 ROLE_DNS_ZONE_CONTRIBUTOR="befefa01-2a29-4197-83a8-272ff33ce314"
 
 log() { printf '%s\n' "$*"; }
@@ -101,11 +103,26 @@ validate_stage() {
     printf '%s: registry name "%s" must be 5-50 lowercase letters and digits\n' "$f" "$(registry_name "$stage")"
     bad=1
   }
+  for key in webHost apiHost; do
+    record_name "$(stage_get "$stage" ".$key")" "$(stage_get "$stage" .shared.dnsZone)" >/dev/null || {
+      printf '%s: "%s" must be a subdomain of shared.dnsZone (its DNS record is written into that zone)\n' "$f" "$key"
+      bad=1
+    }
+  done
   [[ "$(stage_get "$stage" .cluster)" =~ ^[a-zA-Z0-9]([a-zA-Z0-9_-]{0,61}[a-zA-Z0-9])?$ ]] || {
     printf '%s: cluster name is not a valid AKS name\n' "$f"
     bad=1
   }
   [ "$bad" -eq 0 ]
+}
+
+# record_name <host> <zone>: the host's record-set name relative to the zone ("staging" for staging.demo.zzll.de).
+# Fails for the zone apex or a host outside the zone.
+record_name() {
+  case "$1" in
+    ?*".$2") printf '%s' "${1%."$2"}" ;;
+    *) return 1 ;;
+  esac
 }
 
 # Registered Entra app display name for a role ("infra", "web", "api") in a stage, or "infra-preview".

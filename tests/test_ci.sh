@@ -8,7 +8,7 @@ set -euo pipefail
 . "$REPO_ROOT/bootstrap/lib.sh"
 
 CI="$REPO_ROOT/ci/stage.sh"
-unset AZFLOW_NAME_SUFFIX AZFLOW_API_PRINCIPAL_ID AZFLOW_WEB_PRINCIPAL_ID GITHUB_STEP_SUMMARY || true
+unset AZFLOW_NAME_SUFFIX AZFLOW_API_PRINCIPAL_ID AZFLOW_WEB_PRINCIPAL_ID AZFLOW_INFRA_PRINCIPAL_ID GITHUB_STEP_SUMMARY || true
 export AZFLOW_SUBSCRIPTION_ID="sub-test"
 export AZFLOW_POLL_SECONDS=0
 
@@ -216,6 +216,100 @@ assert_file_contains "production record name" "$FAKE_AZ_STATE/calls.log" "--reco
 section "dns-auth: unknown stage"
 run_ci dns-auth nowhere
 assert_eq "exit code" 2 "$RC"
+
+section "api-dns: grants read on the ingress namespace, reads the ingress IP and writes the A record"
+export AZFLOW_INGRESS_ATTEMPTS=3
+new_state
+seed_groups
+echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
+printf '20.1.2.3' >"$FAKE_AZ_STATE/ingress-ip"
+run_ci api-dns staging
+assert_eq "without the infra principal: fails" 2 "$RC"
+assert_contains "points at the seed" "$OUT" "AZFLOW_INFRA_PRINCIPAL_ID"
+[ ! -e "$FAKE_AZ_STATE/calls.log" ] && pass || fail "called az without the infra principal"
+export AZFLOW_INFRA_PRINCIPAL_ID=obj-infra-staging
+ns_scope="/subscriptions/sub-test/resourceGroups/rg-azflow-staging/providers/Microsoft.ContainerService/managedClusters/aks-azflow-staging/namespaces/app-routing-system"
+run_ci api-dns staging
+assert_eq "exit code" 0 "$RC"
+assert_eq "one role assignment" 1 "$(grep -c . "$FAKE_AZ_STATE/roles.jsonl")"
+assert_eq "role is AKS RBAC Reader, for the infra identity, on the ingress namespace only" \
+  "$ROLE_AKS_RBAC_READER obj-infra-staging $ns_scope" "$(jq -r '[.roleDefinitionName, .principalId, .scope] | join(" ")' "$FAKE_AZ_STATE/roles.jsonl")"
+assert_file_contains "kubeconfig written to a file, never the runner's default" "$FAKE_AZ_STATE/calls.log" \
+  "aks get-credentials --resource-group rg-azflow-staging --name aks-azflow-staging --subscription sub-test --file"
+assert_file_contains "kubelogin uses the az sign-in" "$FAKE_AZ_STATE/kubelogin-calls.log" "convert-kubeconfig --login azurecli"
+assert_eq "A record holds the ingress IP" "20.1.2.3" "$(cat "$FAKE_AZ_STATE/a.rg-azflow-shared.demo.zzll.de.api-staging")"
+assert_file_contains "record written into the shared zone" "$FAKE_AZ_STATE/calls.log" \
+  "network dns record-set a add-record --resource-group rg-azflow-shared --zone-name demo.zzll.de --subscription sub-test --record-set-name api-staging --ipv4-address 20.1.2.3"
+assert_contains "summary names host and IP" "$(cat "$SUMMARY_FILE")" '`api-staging.demo.zzll.de` now points at the ingress IP `20.1.2.3`'
+
+section "api-dns: re-run is a no-op"
+before="$(grep -c "record-set a add-record" "$FAKE_AZ_STATE/calls.log")"
+run_ci api-dns staging
+assert_eq "exit code" 0 "$RC"
+assert_contains "says so" "$OUT" "already points at the ingress IP 20.1.2.3"
+assert_eq "no second role assignment" 1 "$(grep -c . "$FAKE_AZ_STATE/roles.jsonl")"
+assert_not_contains "role lookup avoids --assignee (a Graph lookup the pipeline identity cannot make)" "$(grep "role assignment list" "$FAKE_AZ_STATE/calls.log")" "--assignee"
+assert_eq "no second record write" "$before" "$(grep -c "record-set a add-record" "$FAKE_AZ_STATE/calls.log")"
+assert_eq "record unchanged" "20.1.2.3" "$(cat "$FAKE_AZ_STATE/a.rg-azflow-shared.demo.zzll.de.api-staging")"
+
+section "api-dns: a changed ingress IP replaces the old address"
+printf '20.9.9.9' >"$FAKE_AZ_STATE/ingress-ip"
+run_ci api-dns staging
+assert_eq "exit code" 0 "$RC"
+assert_eq "only the new address is left" "20.9.9.9" "$(cat "$FAKE_AZ_STATE/a.rg-azflow-shared.demo.zzll.de.api-staging")"
+assert_file_contains "old address removed" "$FAKE_AZ_STATE/calls.log" "record-set a remove-record --resource-group rg-azflow-shared --zone-name demo.zzll.de --subscription sub-test --record-set-name api-staging --ipv4-address 20.1.2.3"
+add_line="$(grep -n "ipv4-address 20.9.9.9" "$FAKE_AZ_STATE/calls.log" | head -n 1 | cut -d: -f1)"
+remove_line="$(grep -n "remove-record" "$FAKE_AZ_STATE/calls.log" | head -n 1 | cut -d: -f1)"
+[ "$add_line" -lt "$remove_line" ] && pass || fail "new address must be added before the old one is removed"
+
+section "api-dns: waits out a propagating role assignment and a pending load balancer"
+new_state
+seed_groups
+echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
+echo 1 >"$FAKE_AZ_STATE/kubectl-forbidden-first"
+run_ci api-dns staging
+assert_eq "no IP yet after the attempts: fails" 2 "$RC"
+assert_contains "explains" "$OUT" "could not read the ingress IP"
+assert_contains "shows the Forbidden while it waited" "$OUT" "Forbidden"
+[ ! -e "$FAKE_AZ_STATE/a.rg-azflow-shared.demo.zzll.de.api-staging" ] && pass || fail "wrote a record without an IP"
+echo 1 >"$FAKE_AZ_STATE/kubectl-forbidden-first"
+printf '20.4.5.6' >"$FAKE_AZ_STATE/ingress-ip"
+run_ci api-dns staging
+assert_eq "succeeds once readable" 0 "$RC"
+assert_eq "record written" "20.4.5.6" "$(cat "$FAKE_AZ_STATE/a.rg-azflow-shared.demo.zzll.de.api-staging")"
+
+section "api-dns: another principal's grant on the namespace does not count"
+new_state
+seed_groups
+echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
+printf '20.1.2.3' >"$FAKE_AZ_STATE/ingress-ip"
+jq -cn --arg r "$ROLE_AKS_RBAC_READER" --arg s "$ns_scope" '{id: "ra-other", principalId: "obj-someone-else", roleDefinitionName: $r, scope: $s, condition: null}' >"$FAKE_AZ_STATE/roles.jsonl"
+run_ci api-dns staging
+assert_eq "exit code" 0 "$RC"
+assert_eq "infra identity gets its own assignment" 1 "$(jq -s '[.[] | select(.principalId == "obj-infra-staging")] | length' "$FAKE_AZ_STATE/roles.jsonl")"
+
+section "api-dns: needs a running cluster"
+new_state
+seed_groups
+run_ci api-dns staging
+assert_eq "no cluster" 2 "$RC"
+assert_contains "says so" "$OUT" "does not exist"
+echo Stopped >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
+run_ci api-dns staging
+assert_eq "stopped cluster" 2 "$RC"
+assert_contains "names the workflow" "$OUT" "cluster-start"
+assert_not_contains "no role or record change" "$(cat "$FAKE_AZ_STATE/calls.log")" "create"
+
+section "api-dns: production uses the production host and cluster"
+new_state
+seed_groups
+echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-prod"
+printf '20.7.7.7' >"$FAKE_AZ_STATE/ingress-ip"
+AZFLOW_INFRA_PRINCIPAL_ID=obj-infra-prod run_ci api-dns production
+assert_eq "exit code" 0 "$RC"
+assert_eq "production record" "20.7.7.7" "$(cat "$FAKE_AZ_STATE/a.rg-azflow-shared.demo.zzll.de.api")"
+assert_contains "production cluster namespace" "$(jq -r .scope "$FAKE_AZ_STATE/roles.jsonl")" "managedClusters/aks-azflow-prod/namespaces/app-routing-system"
+unset AZFLOW_INFRA_PRINCIPAL_ID AZFLOW_INGRESS_ATTEMPTS
 
 section "destroy"
 new_state
