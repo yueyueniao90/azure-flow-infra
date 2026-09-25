@@ -25,10 +25,10 @@ grep -qx 'login: azurecli' "$kubeconfig" || {
   echo "fake kubectl: kubeconfig not converted with kubelogin --login azurecli; a CI run would prompt for a device code" >&2
   exit 96
 }
-[ "$words" = " get service nginx" ] && [ "$ns" = app-routing-system ] || {
+if [ "$words" != " get service nginx" ] || [ "$ns" != app-routing-system ]; then
   echo "fake kubectl: unsupported:$words (namespace '$ns')" >&2
   exit 99
-}
+fi
 if [ -f "$S/kubectl-forbidden-first" ]; then
   n="$(cat "$S/kubectl-forbidden-first")"
   if [ "$n" -gt 0 ]; then
