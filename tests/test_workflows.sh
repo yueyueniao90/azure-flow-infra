@@ -65,8 +65,12 @@ for f in $files; do
   jobs="$(awk '/^jobs:/ {j=1; next} j && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {n++} END {print n+0}' "$f")"
   perms="$(awk '/^jobs:/ {j=1; next} j && /^    permissions:/ {n++} END {print n+0}' "$f")"
   assert_eq "$f: every job has permissions" "$jobs" "$perms"
-  # id-token: write only where a job logs in to Azure
-  assert_eq "$f: id-token only with azure/login" "$(grep -c 'uses: azure/login@' "$f" || true)" "$(grep -c 'id-token: write' "$f" || true)"
+  # id-token: write only where a job logs in to Azure (a job may sign in more than once, see apply.yml)
+  login_jobs=0
+  while IFS= read -r j; do
+    if job_body "$f" "$j" | grep -q 'uses: azure/login@'; then login_jobs=$((login_jobs + 1)); fi
+  done < <(awk '/^jobs:/ {j=1; next} j && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ {sub(/:.*/, ""); gsub(/ /, ""); print}' "$f")
+  assert_eq "$f: id-token only in jobs with azure/login" "$login_jobs" "$(grep -c 'id-token: write' "$f" || true)"
 done
 assert_eq "checks.yml never logs in" 0 "$(grep -c 'azure/login' $WF/checks.yml || true)"
 assert_eq "checks.yml has no id-token" 0 "$(grep -c 'id-token' $WF/checks.yml || true)"
@@ -107,7 +111,17 @@ assert_contains "applies staging" "$as" "ci/stage.sh apply staging"
 assert_contains "applies production" "$ap" "ci/stage.sh apply production"
 assert_contains "staging domain-ownership TXT record" "$as" "ci/stage.sh dns-auth staging"
 assert_contains "production domain-ownership TXT record" "$ap" "ci/stage.sh dns-auth production"
-for v in AZFLOW_NAME_SUFFIX AZFLOW_API_PRINCIPAL_ID AZFLOW_WEB_PRINCIPAL_ID AZFLOW_SUBSCRIPTION_ID; do
+assert_contains "staging api A record" "$as" "ci/stage.sh api-dns staging"
+assert_contains "production api A record" "$ap" "ci/stage.sh api-dns production"
+# api-dns runs after the deployment, with the tools it needs and a sign-in young enough to fetch the cluster token.
+line_of() { printf '%s\n' "$body" | grep -nF -- "$1" | tail -n 1 | cut -d: -f1; } # last matching line of $body
+for job in apply-staging apply-production; do
+  body="$(job_body "$a" "$job")"
+  [ "$(line_of "ci/stage.sh apply")" -lt "$(line_of "ci/stage.sh api-dns")" ] && pass || fail "$job: api-dns must run after apply"
+  [ "$(line_of "az aks install-cli")" -lt "$(line_of "ci/stage.sh api-dns")" ] && pass || fail "$job: kubectl/kubelogin installed before api-dns"
+  [ "$(line_of "ci/stage.sh apply")" -lt "$(line_of "uses: azure/login@")" ] && pass || fail "$job: signs in again after the deployment, before api-dns"
+done
+for v in AZFLOW_NAME_SUFFIX AZFLOW_API_PRINCIPAL_ID AZFLOW_WEB_PRINCIPAL_ID AZFLOW_INFRA_PRINCIPAL_ID AZFLOW_SUBSCRIPTION_ID; do
   assert_contains "$v passed to staging" "$as" "      $v:"
   assert_contains "$v passed to production" "$ap" "      $v:"
 done

@@ -108,9 +108,9 @@ assert_eq "no assignment at subscription scope" 0 "$(jq -s '[.[] | select(.scope
 assert_file_contains "what-if role defined" "$FAKE_AZ_STATE/roledef.azflow-deployment-whatif" "Microsoft.Resources/deployments/whatIf/action"
 assert_eq "what-if role has no write actions" 0 "$(jq '[.Actions[] | select(test("write|delete"))] | length' "$FAKE_AZ_STATE/roledef.azflow-deployment-whatif")"
 
-section "RBAC Administrator is conditioned to the roles Bicep assigns"
+section "RBAC Administrator is conditioned to the roles Bicep and ci/stage.sh assign"
 cond="$(jq -s -r '[.[] | select(.principalId == "obj-azflow-infra-staging" and .roleDefinitionName == "Role Based Access Control Administrator" and .scope == "'"$S"'/rg-azflow-staging")][0].condition' "$roles")"
-for id in "$ROLE_ACR_PUSH" "$ROLE_ACR_PULL" "$ROLE_AKS_CLUSTER_USER" "$ROLE_AKS_RBAC_WRITER" "$ROLE_CONTRIBUTOR" "$ROLE_DNS_ZONE_CONTRIBUTOR"; do
+for id in "$ROLE_ACR_PUSH" "$ROLE_ACR_PULL" "$ROLE_AKS_CLUSTER_USER" "$ROLE_AKS_RBAC_WRITER" "$ROLE_AKS_RBAC_READER" "$ROLE_CONTRIBUTOR" "$ROLE_DNS_ZONE_CONTRIBUTOR"; do
   assert_contains "condition allows $id" "$cond" "$id"
 done
 for id in "$ROLE_RBAC_ADMIN" "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9" "8e3af657-a8ff-443c-a75c-2fe8c4bcb635"; do
@@ -127,6 +127,7 @@ shared_cond="$(jq -s -r '[.[] | select(.principalId == "obj-azflow-infra-staging
 assert_contains "shared rg allows DNS Zone Contributor" "$shared_cond" "$ROLE_DNS_ZONE_CONTRIBUTOR"
 assert_not_contains "shared rg does not allow AcrPush" "$shared_cond" "$ROLE_ACR_PUSH"
 assert_not_contains "shared rg does not allow Contributor" "$shared_cond" "$ROLE_CONTRIBUTOR"
+assert_not_contains "shared rg does not allow AKS RBAC Reader" "$shared_cond" "$ROLE_AKS_RBAC_READER"
 assert_contains "shared rg condition also quotes ActionMatches" "$shared_cond" "ActionMatches{'Microsoft.Authorization/roleAssignments/write'}"
 
 section "GitHub variables"
@@ -135,6 +136,8 @@ assert_file_contains "infra tenant" "$vars" "yueyueniao90/azure-flow-infra	AZFLO
 assert_file_contains "infra staging client" "$vars" "yueyueniao90/azure-flow-infra	AZFLOW_STAGING_CLIENT_ID	app-azflow-infra-staging"
 assert_file_contains "infra staging api principal" "$vars" "yueyueniao90/azure-flow-infra	AZFLOW_STAGING_API_PRINCIPAL_ID	obj-azflow-api-staging"
 assert_file_contains "infra production web principal" "$vars" "yueyueniao90/azure-flow-infra	AZFLOW_PRODUCTION_WEB_PRINCIPAL_ID	obj-azflow-web-production"
+assert_file_contains "infra staging infra principal (ci/stage.sh api-dns)" "$vars" "yueyueniao90/azure-flow-infra	AZFLOW_STAGING_INFRA_PRINCIPAL_ID	obj-azflow-infra-staging"
+assert_file_contains "infra production infra principal (ci/stage.sh api-dns)" "$vars" "yueyueniao90/azure-flow-infra	AZFLOW_PRODUCTION_INFRA_PRINCIPAL_ID	obj-azflow-infra-production"
 assert_file_contains "preview client" "$vars" "yueyueniao90/azure-flow-infra	AZFLOW_PREVIEW_CLIENT_ID	app-azflow-infra-preview"
 assert_file_contains "web client" "$vars" "yueyueniao90/azure-flow-web	AZFLOW_STAGING_CLIENT_ID	app-azflow-web-staging"
 assert_file_contains "api client" "$vars" "yueyueniao90/azure-flow-api	AZFLOW_PRODUCTION_CLIENT_ID	app-azflow-api-production"

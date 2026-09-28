@@ -63,6 +63,14 @@ assert_eq "two references to one subscription agree" "" "$out"
 jq 'del(.cluster)' "$REPO_ROOT/stages/staging.json" >"$tmp/staging.json"
 out="$(AZFLOW_STAGES_DIR="$tmp" bash -c ". '$REPO_ROOT/bootstrap/lib.sh'; validate_stage staging" 2>&1 || true)"
 assert_contains "missing key rejected" "$out" 'missing "cluster"'
+jq '.apiHost = "api.example.com"' "$REPO_ROOT/stages/staging.json" >"$tmp/staging.json"
+out="$(AZFLOW_STAGES_DIR="$tmp" bash -c ". '$REPO_ROOT/bootstrap/lib.sh'; validate_stage staging" 2>&1 || true)"
+assert_contains "host outside the zone rejected" "$out" '"apiHost" must be a subdomain of shared.dnsZone'
+jq '.webHost = .shared.dnsZone' "$REPO_ROOT/stages/staging.json" >"$tmp/staging.json"
+out="$(AZFLOW_STAGES_DIR="$tmp" bash -c ". '$REPO_ROOT/bootstrap/lib.sh'; validate_stage staging" 2>&1 || true)"
+assert_contains "zone apex rejected" "$out" '"webHost" must be a subdomain of shared.dnsZone'
+assert_eq "record name of a host" "api-staging" "$(record_name api-staging.demo.zzll.de demo.zzll.de)"
+record_name xdemo.zzll.de demo.zzll.de >/dev/null && fail "a name that only ends like the zone is not in it" || pass
 rm -rf "$tmp"
 
 section "public repository hygiene"

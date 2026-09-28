@@ -34,6 +34,7 @@ jobs:
       AZFLOW_NAME_SUFFIX: ${{ vars.AZFLOW_NAME_SUFFIX }}
       AZFLOW_API_PRINCIPAL_ID: ${{ vars.AZFLOW_STAGING_API_PRINCIPAL_ID }}
       AZFLOW_WEB_PRINCIPAL_ID: ${{ vars.AZFLOW_STAGING_WEB_PRINCIPAL_ID }}
+      AZFLOW_INFRA_PRINCIPAL_ID: ${{ vars.AZFLOW_STAGING_INFRA_PRINCIPAL_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -63,6 +64,23 @@ jobs:
       - name: Static Web App custom domain - DNS ownership record
         run: bash ci/stage.sh dns-auth staging
 
+      - name: Install kubectl and kubelogin
+        run: |
+          az aks install-cli --install-location "$RUNNER_TEMP/bin/kubectl" --kubelogin-install-location "$RUNNER_TEMP/bin/kubelogin"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+
+      # Same identity again: az reuses the first sign-in's GitHub OIDC token to fetch any new access token, and that token
+      # expires within minutes (AADSTS700024, Azure/login#180). The cluster API token is only fetched after the deployment.
+      - name: Azure login again (staging infra identity, fresh OIDC token for the cluster API)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZFLOW_STAGING_CLIENT_ID }}
+          tenant-id: ${{ vars.AZFLOW_TENANT_ID }}
+          subscription-id: ${{ vars.AZFLOW_STAGING_SUBSCRIPTION_ID }}
+
+      - name: API host - DNS A record for the ingress IP
+        run: bash ci/stage.sh api-dns staging
+
   apply-production:
     needs: apply-staging
     runs-on: ubuntu-24.04
@@ -78,6 +96,7 @@ jobs:
       AZFLOW_NAME_SUFFIX: ${{ vars.AZFLOW_NAME_SUFFIX }}
       AZFLOW_API_PRINCIPAL_ID: ${{ vars.AZFLOW_PRODUCTION_API_PRINCIPAL_ID }}
       AZFLOW_WEB_PRINCIPAL_ID: ${{ vars.AZFLOW_PRODUCTION_WEB_PRINCIPAL_ID }}
+      AZFLOW_INFRA_PRINCIPAL_ID: ${{ vars.AZFLOW_PRODUCTION_INFRA_PRINCIPAL_ID }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -106,3 +125,20 @@ jobs:
 
       - name: Static Web App custom domain - DNS ownership record
         run: bash ci/stage.sh dns-auth production
+
+      - name: Install kubectl and kubelogin
+        run: |
+          az aks install-cli --install-location "$RUNNER_TEMP/bin/kubectl" --kubelogin-install-location "$RUNNER_TEMP/bin/kubelogin"
+          echo "$RUNNER_TEMP/bin" >>"$GITHUB_PATH"
+
+      # Same identity again: az reuses the first sign-in's GitHub OIDC token to fetch any new access token, and that token
+      # expires within minutes (AADSTS700024, Azure/login#180). The cluster API token is only fetched after the deployment.
+      - name: Azure login again (production infra identity, fresh OIDC token for the cluster API)
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZFLOW_PRODUCTION_CLIENT_ID }}
+          tenant-id: ${{ vars.AZFLOW_TENANT_ID }}
+          subscription-id: ${{ vars.AZFLOW_PRODUCTION_SUBSCRIPTION_ID }}
+
+      - name: API host - DNS A record for the ingress IP
+        run: bash ci/stage.sh api-dns production

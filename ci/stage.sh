@@ -10,12 +10,17 @@
 #                                            domain's TXT record while it runs; summary with name servers
 #   ci/stage.sh dns-auth <stage>            write the Static Web App custom domain's `_dnsauth.<host>` TXT record
 #                                            into the shared zone, if the domain is not already validated (idempotent)
+#   ci/stage.sh api-dns <stage>             point the stage's apiHost A record in the shared zone at the cluster's
+#                                            ingress IP (read with kubectl); no-op when it already does (idempotent)
 #   ci/stage.sh aks <stop|start> <stage>    switch the stage's cluster off or on (idempotent)
 #   ci/stage.sh destroy <stage> [--shared]  delete the stage resource group, and with --shared the shared one too
 #
 # Environment: AZFLOW_SUBSCRIPTION_ID (subscription of the stage; the stage files reference it), and for apply and
 # what-if also AZFLOW_NAME_SUFFIX, AZFLOW_API_PRINCIPAL_ID, AZFLOW_WEB_PRINCIPAL_ID (read by bicep/*.bicepparam).
-# AZFLOW_POLL_SECONDS: how often apply polls the running deployment (default 20).
+# api-dns also needs AZFLOW_INFRA_PRINCIPAL_ID (object ID of the signed-in infra identity, written by the seed), plus
+# kubectl and kubelogin on PATH (az aks install-cli).
+# AZFLOW_POLL_SECONDS: how often apply polls the running deployment, and api-dns the ingress IP (default 20).
+# AZFLOW_INGRESS_ATTEMPTS: how many times api-dns reads the ingress IP before giving up (default 30).
 # The job summary goes to $GITHUB_STEP_SUMMARY when set.
 set -euo pipefail
 # shellcheck source=bootstrap/lib.sh
@@ -26,7 +31,7 @@ SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 summary() { printf '%s\n' "$*" >>"$SUMMARY"; }
 
 usage() {
-  sed -n '3,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 need_stage() {
@@ -176,15 +181,18 @@ validation_token() { # <stage>: the pending dns-txt-token, empty or "null" once 
     --hostname "$(stage_get "$1" .webHost)" --subscription "$AZFLOW_SUBSCRIPTION_ID" --query validationToken -o tsv
 }
 
+host_record() { # <stage> <webHost|apiHost>: that host's record-set name in the shared zone
+  local host zone
+  host="$(stage_get "$1" ".$2")"
+  zone="$(stage_get "$1" .shared.dnsZone)"
+  record_name "$host" "$zone" || die "$2 $host is not a subdomain of zone $zone; this script only handles subdomain hosts."
+}
+
 write_dns_auth_record() { # <stage> <token>: publish `_dnsauth.<host>` in the shared zone (add-record is idempotent)
   local stage="$1" token="$2" host zone subdomain record
   host="$(stage_get "$stage" .webHost)"
   zone="$(stage_get "$stage" .shared.dnsZone)"
-  case "$host" in
-    "$zone") die "custom domain $host is the zone apex; this script only handles subdomain hosts." ;;
-    *".$zone") subdomain="${host%."$zone"}" ;;
-    *) die "custom domain $host is not a subdomain of zone $zone" ;;
-  esac
+  subdomain="$(host_record "$stage" webHost)"
   record="_dnsauth.$subdomain"
   az network dns record-set txt add-record --resource-group "$(stage_get "$stage" .shared.resourceGroup)" --zone-name "$zone" \
     --subscription "$(shared_subscription "$stage")" --record-set-name "$record" --value "$token" >/dev/null
@@ -208,6 +216,114 @@ cmd_dns_auth() {
     return 0
   fi
   write_dns_auth_record "$stage" "$token"
+}
+
+# The API's ingress is AKS's application-routing add-on (managed NGINX). Its public IP is assigned by the cluster's
+# load balancer to the add-on's `nginx` Service in the `app-routing-system` namespace and is not an ARM output of the
+# cluster, so Bicep cannot write this record. Microsoft documents reading it with kubectl:
+#   kubectl get service -n app-routing-system nginx -o jsonpath="{.status.loadBalancer.ingress[0].ip}"
+# (https://learn.microsoft.com/azure/aks/app-routing). The cluster uses Azure RBAC for Kubernetes and the infra
+# identity holds no Kubernetes role by default, so this first grants it Azure Kubernetes Service RBAC Reader on that
+# one namespace (read-only, no Secrets), the narrowest built-in grant that can read the Service. README, "Access model".
+INGRESS_NAMESPACE=app-routing-system
+INGRESS_SERVICE=nginx
+
+cluster_id() { # <stage>
+  az aks show --resource-group "$(stage_get "$1" .resourceGroup)" --name "$(stage_get "$1" .cluster)" \
+    --subscription "$AZFLOW_SUBSCRIPTION_ID" --query id -o tsv
+}
+
+ensure_ingress_reader() { # <stage>: namespace-scoped AKS RBAC Reader for the infra identity (idempotent)
+  local stage="$1" scope n
+  scope="$(cluster_id "$stage")/namespaces/$INGRESS_NAMESPACE"
+  # Filtered by principal here rather than with --assignee, which can make az look the principal up in Microsoft
+  # Graph; the pipeline identity has no Graph permission.
+  n="$(az role assignment list --role "$ROLE_AKS_RBAC_READER" --scope "$scope" --subscription "$AZFLOW_SUBSCRIPTION_ID" \
+    --fill-principal-name false -o json |
+    jq --arg p "$AZFLOW_INFRA_PRINCIPAL_ID" --arg s "$scope" \
+      '[.[] | select(.principalId == $p and (.scope | ascii_downcase) == ($s | ascii_downcase))] | length')"
+  if [ "$n" -gt 0 ]; then
+    log "The infra identity can already read namespace $INGRESS_NAMESPACE."
+    return 0
+  fi
+  az role assignment create --assignee-object-id "$AZFLOW_INFRA_PRINCIPAL_ID" --assignee-principal-type ServicePrincipal \
+    --role "$ROLE_AKS_RBAC_READER" --scope "$scope" --subscription "$AZFLOW_SUBSCRIPTION_ID" -o none
+  log "Granted the infra identity Azure Kubernetes Service RBAC Reader on namespace $INGRESS_NAMESPACE (takes up to five minutes to apply)."
+  summary "- \`$stage\`: granted the infra identity read-only access to namespace \`$INGRESS_NAMESPACE\` (to read the ingress IP)."
+}
+
+# ingress_ip <kubeconfig>: the ingress Service's public IPv4. Retries while the load balancer has not assigned one
+# yet and while a fresh role assignment is still propagating (kubectl then answers Forbidden).
+ingress_ip() {
+  local kubeconfig="$1" n=1 max="${AZFLOW_INGRESS_ATTEMPTS:-30}" ip err
+  while :; do
+    ip="$(kubectl --kubeconfig "$kubeconfig" get service "$INGRESS_SERVICE" --namespace "$INGRESS_NAMESPACE" \
+      -o 'jsonpath={.status.loadBalancer.ingress[0].ip}' 2>"$kubeconfig.err")" || ip=""
+    if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      printf '%s' "$ip"
+      return 0
+    fi
+    err="$(cat "$kubeconfig.err")"
+    if [ "$n" -ge "$max" ]; then
+      warn "no public IP on service $INGRESS_NAMESPACE/$INGRESS_SERVICE after $max attempts${err:+ (last error: $err)}"
+      return 1
+    fi
+    log "Ingress IP not readable yet (attempt $n/$max)${err:+: $err}" >&2
+    sleep "${AZFLOW_POLL_SECONDS:-20}"
+    n=$((n + 1))
+  done
+}
+
+write_api_record() { # <stage> <ip>: make the apiHost A record hold exactly <ip>, touching it only when it differs
+  local stage="$1" ip="$2" host zone record shared_rg shared_sub current old
+  host="$(stage_get "$stage" .apiHost)"
+  zone="$(stage_get "$stage" .shared.dnsZone)"
+  record="$(host_record "$stage" apiHost)"
+  shared_rg="$(stage_get "$stage" .shared.resourceGroup)"
+  shared_sub="$(shared_subscription "$stage")"
+  # Newer az versions print the record list as ARecords, older ones as arecords; a missing record set reads as empty.
+  current="$(az network dns record-set a show --resource-group "$shared_rg" --zone-name "$zone" --subscription "$shared_sub" \
+    --name "$record" --query "(ARecords || aRecords || arecords)[].ipv4Address" -o tsv 2>/dev/null || true)"
+  if [ "$current" = "$ip" ]; then
+    log "A record $host already points at the ingress IP $ip."
+    summary "- \`$stage\`: \`$host\` already points at the ingress IP \`$ip\`."
+    return 0
+  fi
+  # Add the new address before removing any old one, so the name never resolves to nothing in between.
+  az network dns record-set a add-record --resource-group "$shared_rg" --zone-name "$zone" --subscription "$shared_sub" \
+    --record-set-name "$record" --ipv4-address "$ip" >/dev/null
+  for old in $current; do
+    [ "$old" = "$ip" ] && continue
+    az network dns record-set a remove-record --resource-group "$shared_rg" --zone-name "$zone" --subscription "$shared_sub" \
+      --record-set-name "$record" --ipv4-address "$old" --keep-empty-record-set >/dev/null
+  done
+  log "A record $host now points at the ingress IP $ip${current:+ (was: $(printf '%s' "$current" | tr '\n' ' '))}."
+  summary "- \`$stage\`: A record \`$host\` now points at the ingress IP \`$ip\`."
+}
+
+cmd_api_dns() {
+  local stage="$1" cluster state kubeconfig ip
+  need_stage "$stage"
+  need_subscription
+  [ -n "${AZFLOW_INFRA_PRINCIPAL_ID:-}" ] ||
+    die "AZFLOW_INFRA_PRINCIPAL_ID is empty. Re-run bootstrap/seed.sh: it writes AZFLOW_<STAGE>_INFRA_PRINCIPAL_ID (README, \"First-run order\")."
+  require_cmd kubectl "Run: az aks install-cli"
+  require_cmd kubelogin "Run: az aks install-cli"
+  host_record "$stage" apiHost >/dev/null
+  cluster="$(stage_get "$stage" .cluster)"
+  state="$(cluster_state "$stage")"
+  [ -n "$state" ] || die "cluster $cluster does not exist. Run the apply workflow first."
+  [ "$state" = Running ] || die "cluster $cluster is $state, so its ingress IP cannot be read. Run the 'cluster-start' workflow for $stage first."
+  ensure_ingress_reader "$stage"
+  kubeconfig="$(mktemp)"
+  # shellcheck disable=SC2064  # expand now: the local is gone when the trap fires
+  trap "rm -f '$kubeconfig' '$kubeconfig.err'" EXIT
+  # Entra-only cluster: the user kubeconfig carries no credential; kubelogin fetches a token from the az sign-in.
+  az aks get-credentials --resource-group "$(stage_get "$stage" .resourceGroup)" --name "$cluster" \
+    --subscription "$AZFLOW_SUBSCRIPTION_ID" --file "$kubeconfig" --overwrite-existing >/dev/null
+  kubelogin convert-kubeconfig --login azurecli --kubeconfig "$kubeconfig"
+  ip="$(ingress_ip "$kubeconfig")" || die "could not read the ingress IP of cluster $cluster; the A record for $(stage_get "$stage" .apiHost) was not changed."
+  write_api_record "$stage" "$ip"
 }
 
 cmd_aks() {
@@ -286,7 +402,7 @@ main() {
   require_cmd jq "Install jq."
   case "$cmd" in
     missing-vars) cmd_missing_vars "$@" ;;
-    what-if | apply | dns-auth | destroy)
+    what-if | apply | dns-auth | api-dns | destroy)
       [ $# -ge 1 ] || die "$cmd needs a stage (see --help)"
       "cmd_${cmd//-/_}" "$@"
       ;;

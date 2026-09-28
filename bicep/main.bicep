@@ -29,6 +29,9 @@ param webPrincipalId string = ''
 
 var sharedSubscription = empty(sharedSubscriptionId) ? subscription().subscriptionId : sharedSubscriptionId
 
+// webHost relative to the zone ("staging" for staging.demo.zzll.de); bootstrap/lib.sh validates it is in the zone.
+var webRecordName = substring(webHost, 0, length(webHost) - length(dnsZoneName) - 1)
+
 module registry 'modules/registry.bicep' = {
   name: 'registry'
   params: {
@@ -66,7 +69,8 @@ module staticWebApp 'modules/static-web-app.bicep' = {
   }
 }
 
-// The zone lives in the shared resource group. The api identity writes its own A record there.
+// The zone lives in the shared resource group. The apiHost A record is not declared here: the ingress IP is only
+// known inside the cluster, so the apply workflow writes it afterwards (ci/stage.sh api-dns).
 module dnsZone 'modules/dns-zone.bicep' = {
   name: 'dns-zone'
   scope: resourceGroup(sharedSubscription, sharedResourceGroup)
@@ -76,6 +80,18 @@ module dnsZone 'modules/dns-zone.bicep' = {
   }
 }
 
+// Points webHost at the Static Web App. Ownership validation (the `_dnsauth` TXT record) does not make the name resolve.
+module webRecord 'modules/dns-cname.bicep' = {
+  name: 'dns-cname-${webRecordName}'
+  scope: resourceGroup(sharedSubscription, sharedResourceGroup)
+  params: {
+    zoneName: dnsZone.outputs.name
+    recordName: webRecordName
+    target: staticWebApp.outputs.defaultHostname
+  }
+}
+
 output registryLoginServer string = registry.outputs.loginServer
 output staticWebAppDefaultHostname string = staticWebApp.outputs.defaultHostname
+output webRecordFqdn string = webRecord.outputs.fqdn
 output dnsNameServers array = dnsZone.outputs.nameServers

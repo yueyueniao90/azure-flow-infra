@@ -94,7 +94,7 @@ for why it asks GitHub for each repository's token subject.
 | `subscriptionId` | environment reference such as `"$AZFLOW_SUBSCRIPTION_ID"`, resolved when a script runs |
 | `location` | region of the resource group, cluster and registry (per stage, see below) |
 | `resourceGroup`, `cluster`, `registry`, `staticWebApp` | resource names; every stage uses its own |
-| `webHost`, `apiHost` | public hostnames of the stage; `webHost` is bound to the Static Web App as a custom domain (see "HTTPS" below), `apiHost` is used by the AKS Ingress set up in the `azure-flow-api` repo (see "HTTPS") |
+| `webHost`, `apiHost` | public hostnames of the stage, both subdomains of `shared.dnsZone`; `webHost` is bound to the Static Web App as a custom domain (see "HTTPS" below), `apiHost` is used by the AKS Ingress set up in the `azure-flow-api` repo (see "HTTPS"). The pipeline writes both DNS records (see "DNS records for the stage hosts") |
 | `nodeSize` | VM size of the single cluster node (extra key; the preflight recommends a value) |
 | `staticWebAppLocation` | Static Web Apps exist in only a few regions (`westeurope`, `centralus`, `eastus2`, `eastasia`, `westus2`), so this is separate from `location` (extra key) |
 | `shared` | `subscriptionId`, `resourceGroup`, `location`, `dnsZone` of the shared group that holds the DNS zone (extra key; must resolve to the same value in both files) |
@@ -149,7 +149,8 @@ variables). Empty means the corresponding role assignments are skipped.
 | `aks.bicep` | AKS, free control plane, one node, no autoscaler, no add-ons except managed application routing (ingress), Entra-only access | Cluster User Role and RBAC Writer for the api identity |
 | `registry-pull.bicep` | | AcrPull for the cluster's kubelet identity on the stage registry |
 | `static-web-app.bicep` | Static Web App, Free plan, plus a `customDomains` child resource binding `webHost` (`dns-txt-token` validation; see "HTTPS" below) | Contributor on the Static Web App resource only, for the web identity |
-| `dns-zone.bicep` | Azure DNS zone in the shared group (both stages declare it identically) | DNS Zone Contributor for the api identity (it writes its own A record) |
+| `dns-zone.bicep` | Azure DNS zone in the shared group (both stages declare it identically) | DNS Zone Contributor for the api identity |
+| `dns-cname.bicep` | The stage's `webHost` CNAME to the Static Web App's default hostname, in the shared zone | |
 
 The cluster has local accounts disabled and uses Azure RBAC for Kubernetes, so there is no static kubeconfig to leak.
 To use `kubectl` yourself, give your user a role such as *Azure Kubernetes Service RBAC Cluster Admin* on the cluster.
@@ -158,7 +159,7 @@ To use `kubectl` yourself, give your user a role such as *Azure Kubernetes Servi
 
 | Identity (Entra app) | Token subject | Rights |
 | --- | --- | --- |
-| `azflow-infra-<stage>` | infra repo, environment `<stage>` | On its own stage group: Contributor, plus Role Based Access Control Administrator **limited by an ABAC condition** to assigning and removing only AcrPush, AcrPull, AKS Cluster User, AKS RBAC Writer, Contributor and DNS Zone Contributor. On the shared group (only the DNS zone lives there): Contributor, plus RBAC Administrator limited to DNS Zone Contributor. |
+| `azflow-infra-<stage>` | infra repo, environment `<stage>` | On its own stage group: Contributor, plus Role Based Access Control Administrator **limited by an ABAC condition** to assigning and removing only AcrPush, AcrPull, AKS Cluster User, AKS RBAC Writer, AKS RBAC Reader, Contributor and DNS Zone Contributor. On the shared group (only the DNS zone lives there): Contributor, plus RBAC Administrator limited to DNS Zone Contributor. The apply pipeline also gives it AKS RBAC Reader on its own cluster's `app-routing-system` namespace only (see "DNS records for the stage hosts"). |
 | `azflow-web-<stage>` | `azure-flow-web`, branch `main` | Reader on its own stage group; Contributor on its own Static Web App resource only (from Bicep) |
 | `azflow-api-<stage>` | `azure-flow-api`, branch `main` | Reader on its own stage group; AcrPush, AKS Cluster User and RBAC Writer, DNS Zone Contributor on single resources (from Bicep) |
 | `azflow-infra-preview` | infra repo, `pull_request` | Reader plus the custom role `azflow-deployment-whatif` (only `deployments/whatIf/action` and deployment reads; `ci/stage.sh` runs what-if with `--validation-level ProviderNoRbac` so no write permission is checked) on the stage groups and the shared group; role names are unique per tenant, so it is defined once, assignable to every group in every subscription |
@@ -171,7 +172,9 @@ resource-provider action and can only be verified against a real deployment; it 
 The web identity gets the built-in Contributor role, but only on its own Static Web App resource (no Static Web Apps
 role ID could be verified offline). Because Bicep assigns it, Contributor is in the stage-group ABAC condition: an
 infra identity can hand Contributor to another principal within its own stage group, which is no more than it already
-holds there. The shared group's condition still allows DNS Zone Contributor only.
+holds there. The shared group's condition still allows DNS Zone Contributor only. AKS RBAC Reader is in the stage-group condition
+because `ci/stage.sh api-dns` grants it to the infra identity itself, scoped to one namespace, to read the ingress IP;
+it is read-only and a subset of AKS RBAC Writer, which the condition already allowed.
 The ABAC condition string (built by `bootstrap/seed.sh`'s `rbac_condition()`) quotes the action name inside
 `ActionMatches{...}` as a single-quoted string literal, e.g. `ActionMatches{'Microsoft.Authorization/roleAssignments/write'}`;
 Azure rejects an unquoted action name with `InvalidCreateOrUpdateRoleAssignmentRequest`. The `GuidEquals {...}`
@@ -205,7 +208,7 @@ Identifiers only, no secrets. `<S>` is `STAGING` or `PRODUCTION`.
 
 | Repo | Variables |
 | --- | --- |
-| infra | `AZFLOW_TENANT_ID`, `AZFLOW_PREVIEW_CLIENT_ID`, `AZFLOW_NAME_SUFFIX` (if set), and per stage `AZFLOW_<S>_SUBSCRIPTION_ID`, `AZFLOW_<S>_CLIENT_ID`, `AZFLOW_<S>_API_PRINCIPAL_ID`, `AZFLOW_<S>_WEB_PRINCIPAL_ID` |
+| infra | `AZFLOW_TENANT_ID`, `AZFLOW_PREVIEW_CLIENT_ID`, `AZFLOW_NAME_SUFFIX` (if set), and per stage `AZFLOW_<S>_SUBSCRIPTION_ID`, `AZFLOW_<S>_CLIENT_ID`, `AZFLOW_<S>_INFRA_PRINCIPAL_ID`, `AZFLOW_<S>_API_PRINCIPAL_ID`, `AZFLOW_<S>_WEB_PRINCIPAL_ID` |
 | web | `AZFLOW_TENANT_ID` and per stage `AZFLOW_<S>_SUBSCRIPTION_ID`, `_CLIENT_ID`, `_RESOURCE_GROUP`, `_STATIC_WEB_APP`, `_WEB_HOST`, `_API_HOST` |
 | api | `AZFLOW_TENANT_ID`, `AZFLOW_NAME_SUFFIX` (if set) and per stage `AZFLOW_<S>_SUBSCRIPTION_ID`, `_CLIENT_ID`, `_RESOURCE_GROUP`, `_CLUSTER`, `_REGISTRY`, `_API_HOST` |
 
@@ -223,7 +226,7 @@ offline against a fake `az` (`tests/test_ci.sh`) instead of only being provable 
 | --- | --- | --- |
 | `checks.yml` | every pull request, every push to `main` | `tests/run.sh` (shellcheck, Bicep build/lint, the bash suites) plus `actionlint`. No Azure login. |
 | `preview.yml` | pull requests that touch `bicep/**` or `stages/**`, same-repository only | `az deployment group what-if` for each stage with the read-only preview identity (`AZFLOW_PREVIEW_CLIENT_ID`); posts the result to the job summary and to one pull-request comment it updates on every push. A fork pull request gets no Azure token, so the job skips cleanly. Before the seed has run (no resource group yet) it says so instead of failing. |
-| `apply.yml` | pushes to `main` touching `bicep/**` or `stages/**`, and manual dispatch | `apply-staging` deploys staging, then `apply-production` (needs `apply-staging`) deploys production. Each job uses the matching GitHub environment and identity. The deploy writes the custom domain's TXT record while it runs, and each job then re-checks it with `ci/stage.sh dns-auth <stage>` (see "HTTPS" below). The job summary lists the DNS zone's name servers (for the Route 53 delegation, see below). |
+| `apply.yml` | pushes to `main` touching `bicep/**` or `stages/**`, and manual dispatch | `apply-staging` deploys staging, then `apply-production` (needs `apply-staging`) deploys production. Each job uses the matching GitHub environment and identity. The deploy writes the custom domain's TXT record while it runs, and each job then re-checks it with `ci/stage.sh dns-auth <stage>` (see "HTTPS" below). Finally each job signs in again and runs `ci/stage.sh api-dns <stage>`, which points `apiHost` at the cluster's ingress IP (see "DNS records for the stage hosts"). The job summary lists the DNS zone's name servers (for the Route 53 delegation, see below). |
 | `cluster-stop.yml` / `cluster-start.yml` | manual only | `az aks stop` / `az aks start` on one stage or both, so the cluster VM (the bulk of the cost) is not paying for idle time. |
 | `destroy.yml` | manual only | Deletes a stage's resources, and with `include_shared` the shared group (the DNS zone) too. See "Destroying the demo". |
 
@@ -303,6 +306,40 @@ its credit and its spending limit. Check the exact terms and remaining credit in
    would dangle, and anybody who creates a zone named `demo.zzll.de` in their own Azure account could then
    claim the subdomain and serve content under your domain (subdomain takeover).
 
+## DNS records for the stage hosts
+
+Proving ownership of `webHost` (the `_dnsauth` TXT record, see "HTTPS") does not make any name resolve. Each stage
+needs two ordinary records in the shared zone, and the apply pipeline writes both:
+
+| Record | Written by | Points at |
+| --- | --- | --- |
+| `webHost` CNAME (`staging`, `app`) | Bicep, `bicep/modules/dns-cname.bicep`, in the same deployment | the Static Web App's `defaultHostname` |
+| `apiHost` A (`api-staging`, `api`) | `ci/stage.sh api-dns <stage>`, a step after the deployment | the public IP of the cluster's ingress controller |
+
+The A record cannot be Bicep: the ingress is the AKS application-routing add-on (managed NGINX), whose public IP is
+assigned by the cluster's load balancer to the add-on's `nginx` Service in the `app-routing-system` namespace. It
+is not an output of the cluster resource. Microsoft's documented way to read it is
+`kubectl get service -n app-routing-system nginx -o jsonpath="{.status.loadBalancer.ingress[0].ip}"`
+([application routing add-on](https://learn.microsoft.com/azure/aks/app-routing)), so that is what `api-dns` does.
+The cluster uses Azure RBAC for Kubernetes, so the infra identity first grants itself *Azure Kubernetes Service RBAC
+Reader* on that one namespace (built-in role, read-only, cannot read Secrets; namespace scope as documented in
+[Entra ID authorization for the Kubernetes API](https://learn.microsoft.com/azure/aks/manage-azure-rbac)). The
+cluster's user kubeconfig comes from `az aks get-credentials`, which Contributor on the stage group already allows,
+and `kubelogin --login azurecli` turns the pipeline's `az` sign-in into the cluster token. A new grant can take up
+to five minutes to take effect, and a new cluster's load balancer can take a while to assign the IP, so `api-dns`
+retries for up to about ten minutes. It then adds the IP to the A record and removes any other address; when the
+record already holds exactly that IP it changes nothing.
+
+The rejected alternative was reading the load balancer's public IP resource from the cluster's node resource group
+(`MC_<group>_<cluster>_<region>`). It would need Reader on a group AKS creates and names itself, which does not exist
+when the seed runs, so the seed cannot grant it before the first apply. That grant would also expose every resource
+in the group (VM scale set, disks, load balancer). And it would have to pick the ingress IP from the other public IPs
+there, such as the cluster's outbound IP, without a documented way to tell them apart.
+
+**Existing setups: re-run `bootstrap/seed.sh` once before the next apply.** It adds AKS RBAC Reader to the stage
+group's ABAC condition and writes the new `AZFLOW_<S>_INFRA_PRINCIPAL_ID` repository variable (the infra identity's
+object ID, which `api-dns` assigns the role to). Until then, `api-dns` stops with a message naming the seed.
+
 ## HTTPS
 
 Two independent certificate stories, one per surface, chosen so that neither one needs a new Azure role
@@ -345,7 +382,7 @@ tests/run.sh
 One command, offline. It runs shellcheck over all scripts (including `ci/stage.sh` and the fakes), builds and lints
 all Bicep files (warnings fail), checks cost and security invariants of the compiled template (free tiers, one
 node, no monitoring or Key Vault, role assignments limited to what the seed's RBAC condition allows), runs the
-preflight, the seed, `bootstrap/github-environments.sh` and `ci/stage.sh` against a fake `az` and `gh` on `PATH`
+preflight, the seed, `bootstrap/github-environments.sh` and `ci/stage.sh` against a fake `az`, `gh`, `kubectl` and `kubelogin` on `PATH`
 (dry run, first run, idempotent second run, least-privilege scopes, retries, separate subscriptions per stage), and
 checks the workflow files themselves with `actionlint` plus repository-specific rules (every third-party action
 pinned to a full commit SHA, least-privilege `permissions` per job, `id-token: write` only where a job logs in, no
@@ -372,6 +409,14 @@ signs in or touches a subscription. Without either tool the suite fails with ins
   documented name for the application-routing add-on; confirm it against the real add-on before the first
   cert-manager bootstrap (see `bootstrap/cert-manager/README.md`).
 - DNS Zone Contributor for the api identity is zone-wide; it could be narrowed to record-set scope once the records exist.
+  The `apiHost` A record is now written by the infra pipeline (`ci/stage.sh api-dns`), so the api identity may not need
+  that grant at all; that is for the `azure-flow-api` repo to decide.
+- `ci/stage.sh api-dns` is verified offline only (fake `az`, `kubectl`, `kubelogin`): the namespace-scoped role
+  assignment, the `kubelogin --login azurecli` token and the record-set field names `az network dns record-set a show`
+  prints are unproven until a real apply. The ingress IP is only re-read on an apply; if a cluster is ever recreated
+  and gets a new IP, re-run `apply.yml`. The record keeps Azure's default one-hour TTL.
+- The apply job signs in twice: `az` fetches every new access token with the GitHub OIDC token from its sign-in, and that
+  expires within minutes (`AADSTS700024`), which is long before a deployment finishes and the cluster token is needed.
 - A custom role for the infra identities could replace Contributor with an exact action list.
 - A production stage in its own subscription needs the seed run once more; cross-subscription paths are only exercised against the fake `az`, not a real second subscription.
 - The pipeline (step 2) is also verified offline only (`actionlint`, the fake `az`/`gh`, and the repository-specific

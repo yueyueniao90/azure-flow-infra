@@ -184,7 +184,7 @@ case "$cmd" in
       list)
         touch "$S/roles.jsonl"
         jq -s --arg o "$(opt --assignee "$@")" --arg r "$(opt --role "$@")" --arg s "$(opt --scope "$@")" \
-          '[.[] | select(.principalId == $o and .roleDefinitionName == $r and (.scope | ascii_downcase) == ($s | ascii_downcase))]' "$S/roles.jsonl"
+          '[.[] | select(($o == "" or .principalId == $o) and .roleDefinitionName == $r and (.scope | ascii_downcase) == ($s | ascii_downcase))]' "$S/roles.jsonl"
         ;;
       create)
         # Simulates Entra replication lag: the first N creates fail.
@@ -302,11 +302,52 @@ case "$cmd" in
             touch "$f"
             grep -qxF "$val" "$f" || printf '%s\n' "$val" >>"$f"
             ;;
+          # A record sets: one IPv4 address per line in a.<rg>.<zone>.<name>; a missing file is a missing record set.
+          "a show")
+            rg="$(opt --resource-group "$@")"
+            f="$S/a.$rg.$(opt --zone-name "$@").$(opt --name "$@")"
+            [ -e "$S/rg.$rg" ] || fail "ResourceGroupNotFound" 3
+            [ -f "$f" ] || fail "(NotFound) The resource record '$(opt --name "$@")' does not exist" 3
+            case "$(opt --query "$@")" in
+              *"[].ipv4Address") cat "$f" ;;
+              *) fail "unsupported query: $*" 99 ;;
+            esac
+            ;;
+          "a add-record" | "a remove-record")
+            rg="$(opt --resource-group "$@")"
+            f="$S/a.$rg.$(opt --zone-name "$@").$(opt --record-set-name "$@")"
+            ip="$(opt --ipv4-address "$@")"
+            [ -e "$S/rg.$rg" ] || fail "ResourceGroupNotFound" 3
+            [ -n "$ip" ] || fail "--ipv4-address is required" 2
+            if [ "${5:-}" = add-record ]; then
+              touch "$f"
+              grep -qxF "$ip" "$f" || printf '%s\n' "$ip" >>"$f"
+            else
+              [ -f "$f" ] || fail "(NotFound) record set does not exist" 3
+              grep -vxF "$ip" "$f" >"$f.tmp" || true
+              mv "$f.tmp" "$f"
+            fi
+            ;;
           *) fail "unsupported: $*" 99 ;;
         esac
         ;;
       *) fail "unsupported: $*" 99 ;;
     esac
+    ;;
+  "aks show")
+    n="$(opt --name "$@")"
+    [ -f "$S/aks.$n" ] || fail "ResourceNotFound: $n" 3
+    [ "$(opt --query "$@")" = id ] || fail "unsupported query: $*" 99
+    echo "/subscriptions/$(opt --subscription "$@")/resourceGroups/$(opt --resource-group "$@")/providers/Microsoft.ContainerService/managedClusters/$n"
+    ;;
+  "aks get-credentials")
+    # Writes a kubeconfig naming the cluster; tests/fake-bin/kubelogin converts it and kubectl insists on both.
+    n="$(opt --name "$@")"
+    f="$(opt --file "$@")"
+    [ -f "$S/aks.$n" ] || fail "ResourceNotFound: $n" 3
+    [ -n "$f" ] || fail "fake az: get-credentials must write to --file, not the runner's ~/.kube/config" 96
+    has --admin "$@" && fail "local accounts are disabled; --admin is not allowed" 1
+    printf 'cluster: %s\nlogin: devicecode\n' "$n" >"$f"
     ;;
   "aks list")
     [ -e "$S/rg.$(opt --resource-group "$@")" ] || fail "ResourceGroupNotFound" 3

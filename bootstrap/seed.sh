@@ -319,8 +319,11 @@ rbac_condition() { # <role id>...
   printf "((!(ActionMatches{'Microsoft.Authorization/roleAssignments/write'})) OR (@Request[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {%s})) AND ((!(ActionMatches{'Microsoft.Authorization/roleAssignments/delete'})) OR (@Resource[Microsoft.Authorization/roleAssignments:RoleDefinitionId] ForAnyOfAnyValues:GuidEquals {%s}))" "$ids" "$ids"
 }
 
+# The Bicep roles plus AKS RBAC Reader, which ci/stage.sh api-dns grants the infra identity on the add-on's ingress
+# namespace so it can read the ingress IP (README, "Access model").
 stage_rbac_condition() {
-  rbac_condition "$ROLE_ACR_PUSH" "$ROLE_ACR_PULL" "$ROLE_AKS_CLUSTER_USER" "$ROLE_AKS_RBAC_WRITER" "$ROLE_CONTRIBUTOR" "$ROLE_DNS_ZONE_CONTRIBUTOR"
+  rbac_condition "$ROLE_ACR_PUSH" "$ROLE_ACR_PULL" "$ROLE_AKS_CLUSTER_USER" "$ROLE_AKS_RBAC_WRITER" "$ROLE_AKS_RBAC_READER" \
+    "$ROLE_CONTRIBUTOR" "$ROLE_DNS_ZONE_CONTRIBUTOR"
 }
 
 squash() { tr -d ' \n\t'; }
@@ -393,6 +396,7 @@ ensure_whatif_role() { # <sub to hold the definition> <assignable scope>...
 # ---- run: identities, credentials, rights -------------------------------------------------------
 
 INFRA_APP=()
+INFRA_OBJ=()
 API_APP=()
 WEB_APP=()
 API_OBJ=()
@@ -410,10 +414,12 @@ for st in $ALL_STAGES; do
   log "Stage $st"
 
   # infra: environment-scoped token of the infra repo. Contributor deploys the stage's Bicep; the
-  # conditioned RBAC Administrator lets that deployment grant only the narrow roles Bicep assigns.
+  # conditioned RBAC Administrator lets that deployment grant only the narrow roles Bicep assigns (plus the
+  # namespace-scoped AKS RBAC Reader ci/stage.sh api-dns gives the infra identity itself).
   name="$(identity_name infra "$st")"
   ensure_identity "$name"
   INFRA_APP+=("$ID_APP")
+  INFRA_OBJ+=("$ID_OBJ")
   infra_obj="$ID_OBJ"
   ensure_fedcred "$name" "$ID_APP" "github-environment-$st" "$INFRA_SUB_PREFIX:environment:$st"
   ensure_role "$sub" "$rg_scope" "$infra_obj" "Contributor" "$name"
@@ -488,6 +494,7 @@ for st in $ALL_STAGES; do
   u="$(upper "$st")"
   addvar "$INFRA_REPO" "AZFLOW_${u}_SUBSCRIPTION_ID" "${ST_SUB[$i]}"
   addvar "$INFRA_REPO" "AZFLOW_${u}_CLIENT_ID" "${INFRA_APP[$i]}"
+  addvar "$INFRA_REPO" "AZFLOW_${u}_INFRA_PRINCIPAL_ID" "${INFRA_OBJ[$i]}"
   addvar "$INFRA_REPO" "AZFLOW_${u}_API_PRINCIPAL_ID" "${API_OBJ[$i]}"
   addvar "$INFRA_REPO" "AZFLOW_${u}_WEB_PRINCIPAL_ID" "${WEB_OBJ[$i]}"
 
