@@ -42,8 +42,7 @@ bootstrap/cert-manager/install.sh staging --email <your address> --issuer prod  
 # then the same two runs for production
 ```
 
-The email can also come from `AZFLOW_ACME_EMAIL`. It needs `az`, `kubectl` and `kubelogin` (`az aks install-cli`),
-`helm` and `jq`. Each run, against the stage's cluster from `stages/<stage>.json`:
+The email can also come from `AZFLOW_ACME_EMAIL`. Each run, against the stage's cluster from `stages/<stage>.json`:
 
 1. **Self-assigns `Azure Kubernetes Service RBAC Cluster Admin` on the cluster** to the signed-in user, unless
    already assigned. As subscription Owner you can already do this; nothing needs to be granted first. A fresh
@@ -69,7 +68,7 @@ which is fine for this one check. `--issuer prod` refuses to run until `letsencr
 separate, small change in `azure-flow-api`, out of scope here), check with your own kubeconfig:
 
 ```bash
-az aks get-credentials --resource-group rg-azflow-<stage> --name aks-azflow-<stage>
+az aks get-credentials --resource-group rg-azflow-<stage> --name aks-azflow-<stage> --subscription "$AZFLOW_SUBSCRIPTION_ID"
 kubectl get certificate -A
 kubectl describe certificate <name> -n <namespace>   # Ready: True once issued
 ```

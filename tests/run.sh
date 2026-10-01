@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # One command runs everything, offline: shellcheck, Bicep build and lint, and the bash suites
-# (preflight, seed, environments and the CI script against a fake `az` and `gh`) and the workflow checks.
+# (preflight, seed, environments, the cert-manager bootstrap and the CI script against a fake `az`, `gh`, `kubectl`,
+# `kubelogin` and `helm`) and the workflow checks.
 # Needs: bash, jq, shellcheck, bicep (or az bicep), actionlint.
 #   tests/run.sh
 # Set AZFLOW_SKIP_SHELLCHECK=1, AZFLOW_SKIP_BICEP=1 or AZFLOW_SKIP_ACTIONLINT=1 to skip a tool you cannot install.
