@@ -152,9 +152,19 @@ log "  = you can manage cluster-scoped resources"
 
 log
 log "3. cert-manager (helm upgrade --install)"
-helm upgrade --install cert-manager "$CERT_MANAGER_CHART" \
-  --namespace "$CERT_MANAGER_NAMESPACE" --create-namespace --set crds.enabled=true \
-  --kubeconfig "$KUBECONFIG_FILE" --wait
+helm_install() {
+  helm upgrade --install cert-manager "$CERT_MANAGER_CHART" \
+    --namespace "$CERT_MANAGER_NAMESPACE" --create-namespace --set crds.enabled=true \
+    --kubeconfig "$KUBECONFIG_FILE" --wait "$@" 2>&1 | tee "$WORK/helm.log"
+}
+if ! helm_install; then
+  # On a re-run, AKS's admissions enforcer owns the webhook's namespaceSelector (it adds its own exemption), so
+  # Helm's server-side apply conflicts with it. Only that known conflict is retried, once, forcing Helm's fields.
+  grep -q 'conflict with "admissionsenforcer"' "$WORK/helm.log" ||
+    die "helm upgrade --install failed (output above)"
+  log "  AKS's admissions enforcer also manages cert-manager's webhook configuration; retrying once with --force-conflicts"
+  helm_install --force-conflicts || die "helm upgrade --install --force-conflicts failed (output above)"
+fi
 log "  + cert-manager installed or up to date in namespace $CERT_MANAGER_NAMESPACE"
 log "  Its three pods (controller, webhook, cainjector) share the single node with the API; confirm they are"
 log "  Running: kubectl get pods -n $CERT_MANAGER_NAMESPACE (README, \"Node capacity\")."

@@ -51,7 +51,10 @@ The email can also come from `AZFLOW_ACME_EMAIL`. It needs `az`, `kubectl` and `
 2. **Gets cluster credentials** (`az aks get-credentials`) into a temporary kubeconfig, converted with `kubelogin`
    to use your `az` sign-in; your `~/.kube/config` is not touched.
 3. **Installs cert-manager with Helm** (`helm upgrade --install`, chart `oci://quay.io/jetstack/charts/cert-manager`,
-   CRDs enabled).
+   CRDs enabled). On a re-run, AKS's built-in admissions enforcer has already added its own exemption to the
+   `namespaceSelector` of cert-manager's `ValidatingWebhookConfiguration`, which conflicts with Helm's server-side
+   apply (`conflict with "admissionsenforcer"`). The script retries that one known conflict once with
+   `--force-conflicts`; any other Helm failure stops the script with Helm's output.
 4. **Applies the ClusterIssuer**, `cluster-issuer-staging.yaml` by default or `cluster-issuer-prod.yaml` with
    `--issuer prod`, with your email substituted into a temporary copy. The checked-in YAMLs keep their
    placeholder and are never committed with a real address.

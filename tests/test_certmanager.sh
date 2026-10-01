@@ -160,6 +160,27 @@ assert_file_contains "prod issuer is the production server" "$FAKE_AZ_STATE/clus
   "acme-v02.api.letsencrypt.org"
 assert_eq "checked-in issuer YAMLs still unchanged" "$SUMS_BEFORE" "$(checksum)"
 
+section "re-run on AKS: admissions-enforcer conflict on the webhook is retried once with --force-conflicts"
+cluster_state
+: >"$FAKE_AZ_STATE/helm-ssa-conflict"
+run_install staging --email "$EMAIL"
+assert_eq "exit code" 0 "$RC"
+assert_contains "original helm error shown" "$OUT" 'conflict with "admissionsenforcer"'
+assert_count "two helm calls" 2 "$FAKE_AZ_STATE/helm-calls.log" "upgrade --install cert-manager"
+assert_count "exactly one forced retry" 1 "$FAKE_AZ_STATE/helm-calls.log" "--force-conflicts"
+assert_eq "helm installed after the retry" "aks-azflow-staging" "$(cat "$FAKE_AZ_STATE/helm.cert-manager")"
+assert_file_contains "issuer applied after the retry" "$FAKE_AZ_STATE/clusterissuer.letsencrypt-staging" "email: $EMAIL"
+
+section "any other helm failure: no forced retry, the script fails"
+cluster_state
+: >"$FAKE_AZ_STATE/helm-fail"
+run_install staging --email "$EMAIL"
+assert_eq "exit code" 2 "$RC"
+assert_contains "original helm error shown" "$OUT" "context deadline exceeded"
+assert_count "one helm call" 1 "$FAKE_AZ_STATE/helm-calls.log" "upgrade --install cert-manager"
+assert_count "never forced" 0 "$FAKE_AZ_STATE/helm-calls.log" "--force-conflicts"
+assert_eq "no issuer applied" "" "$(ls "$FAKE_AZ_STATE"/clusterissuer.letsencrypt-staging 2>/dev/null || true)"
+
 section "preconditions: signed in, subscription set, cluster exists"
 cluster_state
 : >"$FAKE_AZ_STATE/not-logged-in"
