@@ -184,7 +184,7 @@ log "Next:"
 if [ "$issuer" = staging ]; then
   log "  5. Annotate the API's Ingress with cert-manager.io/cluster-issuer: letsencrypt-staging and a tls: block for"
   log "     $(stage_get "$stage" .apiHost) (in azure-flow-api), then confirm a certificate issues:"
-  log "       az aks get-credentials --resource-group $rg --name $cluster"
+  log "       az aks get-credentials --resource-group $rg --name $cluster --subscription $sub"
   log "       kubectl get certificate -A"
   log "       kubectl describe certificate <name> -n <namespace>   # Ready: True once issued"
   log "  6. Then switch to the production issuer (tight rate limits; README, \"Rate limits\"):"
