@@ -165,6 +165,12 @@ case "$cmd" in
       *) fail "unsupported: $*" 99 ;;
     esac
     ;;
+  "ad signed-in-user")
+    [ "$sub3" = show ] || fail "unsupported: $*" 99
+    [ ! -e "$S/not-logged-in" ] || fail "Please run 'az login'"
+    [ "$(opt --query "$@")" = id ] || fail "unsupported query: $*" 99
+    echo "user-fake"
+    ;;
   "ad sp")
     case "$sub3" in
       list)
@@ -195,7 +201,12 @@ case "$cmd" in
             fail "PrincipalNotFound: principal does not exist in the directory yet" 1
           fi
         fi
-        [ "$(opt --assignee-principal-type "$@")" = "ServicePrincipal" ] || fail "role create must pass --assignee-principal-type ServicePrincipal" 96
+        # Only bootstrap/cert-manager/install.sh assigns a user (the captain, Cluster Admin on one cluster).
+        if [ "$(opt --role "$@")" = "Azure Kubernetes Service RBAC Cluster Admin" ]; then
+          [ "$(opt --assignee-principal-type "$@")" = "User" ] || fail "Cluster Admin is only ever self-assigned: pass --assignee-principal-type User" 96
+        else
+          [ "$(opt --assignee-principal-type "$@")" = "ServicePrincipal" ] || fail "role create must pass --assignee-principal-type ServicePrincipal" 96
+        fi
         if has --condition "$@"; then
           [ "$(opt --condition-version "$@")" = "2.0" ] || fail "condition needs --condition-version 2.0" 95
           cond_val="$(opt --condition "$@")"

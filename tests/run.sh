@@ -29,7 +29,7 @@ shellcheck_all() {
     echo "shellcheck not found (brew install shellcheck) or set AZFLOW_SKIP_SHELLCHECK=1" >&2
     return 1
   fi
-  shellcheck -x bootstrap/*.sh ci/*.sh tests/*.sh tests/fake-bin/az tests/fake-bin/gh tests/fake-bin/kubectl tests/fake-bin/kubelogin && echo "shellcheck: clean"
+  shellcheck -x bootstrap/*.sh bootstrap/cert-manager/*.sh ci/*.sh tests/*.sh tests/fake-bin/az tests/fake-bin/gh tests/fake-bin/kubectl tests/fake-bin/kubelogin tests/fake-bin/helm && echo "shellcheck: clean"
 }
 
 step "shellcheck" shellcheck_all
@@ -38,6 +38,7 @@ step "bicep" bash tests/test_bicep.sh
 step "preflight" bash tests/test_preflight.sh
 step "seed" bash tests/test_seed.sh
 step "github environments" bash tests/test_environments.sh
+step "cert-manager install" bash tests/test_certmanager.sh
 step "ci script" bash tests/test_ci.sh
 step "workflows" bash tests/test_workflows.sh
 

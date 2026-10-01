@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Fake helm for the offline tests: answers only bootstrap/cert-manager/install.sh's
+# `upgrade --install cert-manager <chart> --namespace cert-manager --create-namespace --set crds.enabled=true
+# --kubeconfig <file> --wait`, with a kubeconfig the fake kubelogin converted. Records the release in
+# $FAKE_AZ_STATE/helm.cert-manager. Anything else fails loudly (exit 99).
+set -u
+: "${FAKE_AZ_STATE:?FAKE_AZ_STATE must point at a test state directory}"
+S="$FAKE_AZ_STATE"
+printf '%s\n' "$*" >>"$S/helm-calls.log"
+expected_prefix="upgrade --install cert-manager oci://quay.io/jetstack/charts/cert-manager --namespace cert-manager --create-namespace --set crds.enabled=true --kubeconfig "
+args="$*"
+case "$args" in
+  "$expected_prefix"*" --wait") ;;
+  *)
+    echo "fake helm: unsupported: $*" >&2
+    exit 99
+    ;;
+esac
+kubeconfig="${args#"$expected_prefix"}"
+kubeconfig="${kubeconfig% --wait}"
+if [ ! -f "$kubeconfig" ] || ! grep -qx 'login: azurecli' "$kubeconfig"; then
+  echo "fake helm: kubeconfig '$kubeconfig' missing or not converted with kubelogin --login azurecli" >&2
+  exit 96
+fi
+sed -n 's/^cluster: //p' "$kubeconfig" >"$S/helm.cert-manager"
+echo 'Release "cert-manager" has been upgraded. Happy Helming!'

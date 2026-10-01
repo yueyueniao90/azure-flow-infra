@@ -27,7 +27,7 @@ tests/             offline test suite: tests/run.sh
 | [GitHub CLI](https://cli.github.com/) (`gh`), authenticated | seed writes repository variables (optional: otherwise it prints them); `bootstrap/github-environments.sh` needs admin rights on the repository |
 | `jq` | preflight, seed, github-environments, tests |
 | `shellcheck`, the Bicep CLI (standalone [`bicep`](https://aka.ms/bicep-install) or `az bicep`), [`actionlint`](https://github.com/rhysd/actionlint) | tests only |
-| [Helm](https://helm.sh/docs/intro/install/), `kubectl` | the captain's manual cert-manager bootstrap only (`bootstrap/cert-manager/README.md`, see "HTTPS"); no pipeline or test needs them |
+| [Helm](https://helm.sh/docs/intro/install/), `kubectl`, `kubelogin` | the captain's manual cert-manager bootstrap only (`bootstrap/cert-manager/install.sh`, see "HTTPS"); no pipeline needs Helm, and the tests use fakes |
 
 You need to be able to create app registrations in your Entra tenant and to assign roles on the subscription
 (Owner of the subscription is enough). The scripts also run on the macOS default bash (3.2).
@@ -366,7 +366,7 @@ identity, and a widened RBAC condition) purely to enable wildcard certificates t
 need. cert-manager's Helm chart installs cluster-scoped CRDs and ClusterRoles — comparable to
 cluster-admin — so no pipeline identity installs it: it is a **manual, one-time-per-cluster step the
 captain runs**, the same way `bootstrap/seed.sh` itself is captain-run, using the subscription-Owner
-access he already has. The full procedure, and the two checked-in `ClusterIssuer` YAMLs (Let's Encrypt
+access he already has. The procedure (scripted as `bootstrap/cert-manager/install.sh <stage> --email <address>`), and the two checked-in `ClusterIssuer` YAMLs (Let's Encrypt
 staging server first, then production, for the rate-limit reasons explained there), live in
 [`bootstrap/cert-manager/README.md`](bootstrap/cert-manager/README.md) — this is the one place that
 procedure is documented; **must be re-run if a stage's cluster is ever destroyed and recreated.** The
@@ -382,7 +382,7 @@ tests/run.sh
 One command, offline. It runs shellcheck over all scripts (including `ci/stage.sh` and the fakes), builds and lints
 all Bicep files (warnings fail), checks cost and security invariants of the compiled template (free tiers, one
 node, no monitoring or Key Vault, role assignments limited to what the seed's RBAC condition allows), runs the
-preflight, the seed, `bootstrap/github-environments.sh` and `ci/stage.sh` against a fake `az`, `gh`, `kubectl` and `kubelogin` on `PATH`
+preflight, the seed, `bootstrap/github-environments.sh`, `bootstrap/cert-manager/install.sh` and `ci/stage.sh` against a fake `az`, `gh`, `kubectl`, `kubelogin` and `helm` on `PATH`
 (dry run, first run, idempotent second run, least-privilege scopes, retries, separate subscriptions per stage), and
 checks the workflow files themselves with `actionlint` plus repository-specific rules (every third-party action
 pinned to a full commit SHA, least-privilege `permissions` per job, `id-token: write` only where a job logs in, no

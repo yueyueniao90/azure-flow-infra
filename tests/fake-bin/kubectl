@@ -1,18 +1,24 @@
 #!/usr/bin/env bash
-# Fake kubectl for the offline tests. Answers only `get service <name> --namespace <ns> -o jsonpath=...` and only with a
-# kubeconfig from the fake `az aks get-credentials` that the fake kubelogin converted to azurecli login.
+# Fake kubectl for the offline tests. Answers only with a kubeconfig from the fake `az aks get-credentials` that the
+# fake kubelogin converted to azurecli login, and only these commands:
+#   get service nginx --namespace app-routing-system -o jsonpath=...   (ci/stage.sh api-dns)
+#   auth can-i create customresourcedefinitions.apiextensions.k8s.io  (bootstrap/cert-manager/install.sh)
+#   get clusterissuer <name>; apply -f <ClusterIssuer file>            (bootstrap/cert-manager/install.sh)
 # State in $FAKE_AZ_STATE: ingress-ip (the Service's load-balancer IP; absent = still pending),
-# kubectl-forbidden-first (a count: that many calls fail Forbidden first, like a role assignment still propagating).
+# kubectl-forbidden-first (a count: that many calls fail Forbidden first, like a role assignment still propagating),
+# roles.jsonl (from the fake az: `auth can-i` answers yes once the Cluster Admin role is assigned on the cluster),
+# clusterissuer.<name> (each applied ClusterIssuer, as applied).
 set -u
 : "${FAKE_AZ_STATE:?FAKE_AZ_STATE must point at a test state directory}"
 S="$FAKE_AZ_STATE"
 printf '%s\n' "$*" >>"$S/kubectl-calls.log"
-kubeconfig="" ns="" out="" words=""
+kubeconfig="" ns="" out="" file="" words=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --kubeconfig) kubeconfig="$2" && shift ;;
     --namespace | -n) ns="$2" && shift ;;
     -o) out="$2" && shift ;;
+    -f) file="$2" && shift ;;
     *) words="$words $1" ;;
   esac
   shift
@@ -25,21 +31,73 @@ grep -qx 'login: azurecli' "$kubeconfig" || {
   echo "fake kubectl: kubeconfig not converted with kubelogin --login azurecli; a CI run would prompt for a device code" >&2
   exit 96
 }
-if [ "$words" != " get service nginx" ] || [ "$ns" != app-routing-system ]; then
-  echo "fake kubectl: unsupported:$words (namespace '$ns')" >&2
-  exit 99
-fi
-if [ -f "$S/kubectl-forbidden-first" ]; then
-  n="$(cat "$S/kubectl-forbidden-first")"
-  if [ "$n" -gt 0 ]; then
-    echo $((n - 1)) >"$S/kubectl-forbidden-first"
-    echo 'Error from server (Forbidden): services "nginx" is forbidden: User does not have access to the resource in Azure. Update role assignment to allow access.' >&2
-    exit 1
+cluster="$(sed -n 's/^cluster: //p' "$kubeconfig")"
+forbidden() {
+  if [ -f "$S/kubectl-forbidden-first" ]; then
+    n="$(cat "$S/kubectl-forbidden-first")"
+    if [ "$n" -gt 0 ]; then
+      echo $((n - 1)) >"$S/kubectl-forbidden-first"
+      echo "Error from server (Forbidden): $1 is forbidden: User does not have access to the resource in Azure. Update role assignment to allow access." >&2
+      exit 1
+    fi
   fi
-fi
-[ "$out" = 'jsonpath={.status.loadBalancer.ingress[0].ip}' ] || {
-  echo "fake kubectl: unsupported output format '$out'" >&2
-  exit 99
 }
-[ -f "$S/ingress-ip" ] && cat "$S/ingress-ip"
+case "$words" in
+  " get service nginx")
+    [ "$ns" = app-routing-system ] || {
+      echo "fake kubectl: unsupported:$words (namespace '$ns')" >&2
+      exit 99
+    }
+    forbidden 'services "nginx"'
+    [ "$out" = 'jsonpath={.status.loadBalancer.ingress[0].ip}' ] || {
+      echo "fake kubectl: unsupported output format '$out'" >&2
+      exit 99
+    }
+    [ -f "$S/ingress-ip" ] && cat "$S/ingress-ip"
+    ;;
+  " auth can-i create customresourcedefinitions.apiextensions.k8s.io")
+    if [ -f "$S/kubectl-forbidden-first" ] && [ "$(cat "$S/kubectl-forbidden-first")" -gt 0 ]; then
+      echo $(($(cat "$S/kubectl-forbidden-first") - 1)) >"$S/kubectl-forbidden-first"
+      echo no
+      exit 1
+    fi
+    if [ -f "$S/roles.jsonl" ] && jq -e -s --arg c "$cluster" \
+      'any(.[]; .roleDefinitionName == "Azure Kubernetes Service RBAC Cluster Admin" and (.scope | endswith("/managedClusters/" + $c)))' \
+      "$S/roles.jsonl" >/dev/null; then
+      echo yes
+    else
+      echo no
+      exit 1
+    fi
+    ;;
+  " get clusterissuer "*)
+    name="${words# get clusterissuer }"
+    [ -f "$S/clusterissuer.$name" ] || {
+      echo "Error from server (NotFound): clusterissuers.cert-manager.io \"$name\" not found" >&2
+      exit 1
+    }
+    echo "$name"
+    ;;
+  " apply")
+    [ -f "$file" ] || {
+      echo "fake kubectl: apply -f '$file': no such file" >&2
+      exit 1
+    }
+    [ -f "$S/helm.cert-manager" ] || {
+      echo "fake kubectl: no matches for kind \"ClusterIssuer\" in version \"cert-manager.io/v1\" (install cert-manager first)" >&2
+      exit 1
+    }
+    name="$(sed -n 's/^  name: //p' "$file" | head -n 1)"
+    [ -n "$name" ] || {
+      echo "fake kubectl: unsupported apply of $file" >&2
+      exit 99
+    }
+    cp "$file" "$S/clusterissuer.$name"
+    echo "clusterissuer.cert-manager.io/$name configured"
+    ;;
+  *)
+    echo "fake kubectl: unsupported:$words" >&2
+    exit 99
+    ;;
+esac
 exit 0
