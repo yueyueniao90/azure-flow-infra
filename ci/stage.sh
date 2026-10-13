@@ -70,6 +70,13 @@ cluster_identity_type() { # <stage>: UserAssigned, SystemAssigned, ...
     --subscription "$AZFLOW_SUBSCRIPTION_ID" --query identity.type -o tsv
 }
 
+# A cluster created before the shared public IP (README, "One public IP per stage") has a system-assigned identity
+# and an AKS-managed outbound IP. Updating it in place would need a public IP the regional quota no longer has, and
+# switching its identity takes hours to settle; it has to be deleted and recreated instead.
+predates_shared_ip() { # <stage> <cluster state>: true when the existing cluster has to be recreated
+  [ -n "$2" ] && [ "$(cluster_identity_type "$1")" != UserAssigned ]
+}
+
 cmd_missing_vars() {
   local name
   for name in "$@"; do
@@ -92,6 +99,12 @@ cmd_what_if() {
   fi
   if ! group_exists "$shared_rg" "$shared_sub"; then
     printf 'Shared resource group `%s` does not exist yet (it holds the DNS zone and is created by `bootstrap/seed.sh`), so the preview cannot run.\n\n' "$shared_rg"
+    return 0
+  fi
+  # Azure's preflight counts the new static IP on top of the old cluster's IPs and rejects it on the regional quota,
+  # so there is nothing to preview until the cluster is recreated (cmd_apply refuses it too).
+  if predates_shared_ip "$stage" "$(cluster_state "$stage")"; then
+    printf 'Cluster `%s` predates the shared public IP, so it is deleted and recreated rather than updated, and what-if cannot preview that (README, "One public IP per stage").\n\n' "$(stage_get "$stage" .cluster)"
     return 0
   fi
   rc=0
@@ -125,10 +138,7 @@ cmd_apply() {
   if [ "$state" = Stopped ]; then
     die "cluster $(stage_get "$stage" .cluster) is stopped and Azure rejects updates to a stopped cluster. Run the 'cluster-start' workflow for $stage, then re-run this deployment (it can be stopped again afterwards)."
   fi
-  # A cluster created before the shared public IP (README, "One public IP per stage") has a system-assigned identity
-  # and an AKS-managed outbound IP. Updating it in place would need a public IP the regional quota no longer has, and
-  # switching its identity takes hours to settle; it has to be deleted and recreated instead.
-  if [ -n "$state" ] && [ "$(cluster_identity_type "$stage")" != UserAssigned ]; then
+  if predates_shared_ip "$stage" "$state"; then
     die "cluster $(stage_get "$stage" .cluster) predates the shared public IP (its identity is not user-assigned). Delete it as described in README \"One public IP per stage\" (az aks delete --resource-group $rg --name $(stage_get "$stage" .cluster)), then re-run this deployment."
   fi
   name="azflow-$stage-${GITHUB_RUN_ID:-manual}"

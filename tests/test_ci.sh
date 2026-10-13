@@ -91,6 +91,20 @@ assert_contains "failure in the comment" "$OUT" "What-if failed"
 assert_contains "the error text" "$OUT" "deployment failed"
 rm -f "$FAKE_AZ_STATE/deploy-fails"
 
+section "what-if: a cluster from before the shared public IP is not previewed"
+new_state
+seed_groups
+echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
+echo SystemAssigned >"$FAKE_AZ_STATE/aks-identity.aks-azflow-staging"
+run_ci_stdout what-if staging
+assert_eq "exit code" 0 "$RC"
+assert_contains "explains" "$OUT" "predates the shared public IP"
+assert_not_contains "no what-if call" "$(cat "$FAKE_AZ_STATE/calls.log")" "deployment group what-if"
+rm -f "$FAKE_AZ_STATE/aks-identity.aks-azflow-staging"
+run_ci_stdout what-if staging
+assert_eq "recreated cluster: previewed" 0 "$RC"
+assert_file_contains "recreated cluster: what-if runs" "$FAKE_AZ_STATE/calls.log" "deployment group what-if"
+
 section "apply"
 new_state
 run_ci apply staging
