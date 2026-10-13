@@ -110,8 +110,6 @@ assert_eq "no outbound IP prefixes" null "$(q "$cl"' | .properties.networkProfil
 assert_eq "outbound type stays the load balancer (no NAT gateway)" null "$(q "$cl"' | .properties.networkProfile.outboundType')"
 assert_eq "control plane uses the user-assigned identity" UserAssigned "$(q "$cl"' | .identity.type')"
 assert_contains "cluster waits for the identity's network role" "$(q "$cl"' | .dependsOn | join(" ")')" "Microsoft.Authorization/roleAssignments"
-assert_eq "public IP address is a deployment output" "[reference(resourceId('Microsoft.Resources/deployments', 'cluster'), '2025-04-01').outputs.publicIpAddress.value]" \
-  "$(printf '%s' "$template" | jq -r .outputs.publicIpAddress.value)"
 assert_eq "registry is Basic" Basic "$(q '.[] | select(.type == "Microsoft.ContainerRegistry/registries") | .sku.name')"
 assert_eq "registry admin user off" false "$(q '.[] | select(.type == "Microsoft.ContainerRegistry/registries") | .properties.adminUserEnabled')"
 assert_eq "static web app is Free" Free "$(q '.[] | select(.type == "Microsoft.Web/staticSites") | .sku.name')"

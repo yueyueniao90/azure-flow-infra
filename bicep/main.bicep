@@ -93,7 +93,6 @@ module webRecord 'modules/dns-cname.bicep' = {
 }
 
 output registryLoginServer string = registry.outputs.loginServer
-output publicIpAddress string = cluster.outputs.publicIpAddress
 output staticWebAppDefaultHostname string = staticWebApp.outputs.defaultHostname
 output webRecordFqdn string = webRecord.outputs.fqdn
 output dnsNameServers array = dnsZone.outputs.nameServers

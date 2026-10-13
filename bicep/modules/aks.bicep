@@ -136,5 +136,3 @@ resource rbacWriter 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (!
 
 output name string = cluster.name
 output kubeletPrincipalId string = cluster.properties.identityProfile.kubeletidentity.objectId
-output publicIpName string = publicIp.name
-output publicIpAddress string = publicIp.properties.ipAddress

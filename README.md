@@ -358,7 +358,7 @@ without leaving the free trial. So each stage uses **one** static public IP for 
 
 1. **Bicep** (`bicep/modules/aks.bicep`) creates a static Standard public IP `pip-<cluster>` in the stage group and
    sets it as the cluster's only outbound IP (`networkProfile.loadBalancerProfile.outboundIPs`); AKS then creates no
-   outbound IP of its own. The address is the deployment output `publicIpAddress`.
+   outbound IP of its own.
 2. **A one-time, captain-run script**, `bootstrap/ingress-ip/bind.sh <stage>`, points the application-routing
    add-on's default NGINX ingress controller at the same IP. It sets two load-balancer annotations on the add-on's
    `NginxIngressController` named `default`, `service.beta.kubernetes.io/azure-pip-name` and
