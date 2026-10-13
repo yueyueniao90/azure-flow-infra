@@ -391,18 +391,20 @@ succeeds.
 
 1. Delete staging's cluster:
    `az aks delete --resource-group rg-azflow-staging --name aks-azflow-staging --subscription "$AZFLOW_SUBSCRIPTION_ID"`.
-   This frees both of its IPs. The staging API is offline, and its address changes, until step 3.
+   This frees both of its IPs. The staging API is offline, and its address changes, until step 3 is done.
 2. Run `apply.yml`. Staging creates `pip-aks-azflow-staging` and a new cluster that uses it. Its `api-dns` step
    fails until step 3, saying so, so production does not run yet.
 3. `bootstrap/ingress-ip/bind.sh staging`, then re-run `apply.yml`. Staging goes green (`api-dns` writes the A
-   record); production's job then runs and stops at its refusal of its old cluster.
+   record); production's job then runs and stops at its refusal of its old cluster. Then run
+   `bootstrap/cert-manager/install.sh staging --email <address>` (README there) and redeploy the api to the new
+   staging cluster from `azure-flow-api`; staging's API is back online.
 4. Delete production's cluster:
    `az aks delete --resource-group rg-azflow-prod --name aks-azflow-prod --subscription "$AZFLOW_SUBSCRIPTION_ID"`.
 5. Re-run `apply.yml` and approve production. It creates `pip-aks-azflow-prod` and a new cluster; its `api-dns`
    step fails until step 6.
 6. `bootstrap/ingress-ip/bind.sh production`, then re-run `apply.yml`.
-7. For each new cluster, run `bootstrap/cert-manager/install.sh <stage> --email <address>` (README there) and
-   redeploy the api to it from `azure-flow-api`.
+7. `bootstrap/cert-manager/install.sh production --email <address>` and redeploy the api to the new production
+   cluster from `azure-flow-api`.
 
 Afterwards each stage holds exactly one public IP, two in total. A new cluster's ingress briefly takes a temporary
 IP of its own until `bind.sh` runs (or stays pending if the quota is full), and the cloud provider releases it once
