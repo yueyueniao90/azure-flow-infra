@@ -341,8 +341,9 @@ record already holds exactly that IP it changes nothing.
 The rejected alternative was reading the load balancer's public IP resource from the cluster's node resource group
 (`MC_<group>_<cluster>_<region>`). It would need Reader on a group AKS creates and names itself, which does not exist
 when the seed runs, so the seed cannot grant it before the first apply. That grant would also expose every resource
-in the group (VM scale set, disks, load balancer). And it would have to pick the ingress IP from the other public IPs
-there, such as the cluster's outbound IP, without a documented way to tell them apart.
+in the group (VM scale set, disks, load balancer). The stage's static IP now lives in the stage group instead (see
+"One public IP per stage"), but its address alone does not show whether the ingress is bound to it yet, so the
+Service stays the source of truth.
 
 **Existing setups: re-run `bootstrap/seed.sh` once before the next apply.** It adds AKS RBAC Reader to the stage
 group's ABAC condition and writes the new `AZFLOW_<S>_INFRA_PRINCIPAL_ID` repository variable (the infra identity's

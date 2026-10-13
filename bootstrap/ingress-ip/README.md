@@ -18,7 +18,7 @@ It cannot be Bicep: the `NginxIngressController` is a Kubernetes object, not an 
 step either: the object is cluster-scoped, so changing it needs a cluster-wide Kubernetes role (the script uses
 `Azure Kubernetes Service RBAC Cluster Admin`, like the cert-manager bootstrap). No pipeline identity here holds or
 should hold such a role (`AGENTS.md`, main README "Access model"). So the captain runs it by hand, with the
-subscription-Owner access he already has.
+subscription-Owner access the captain already has.
 
 **Must be re-run if a stage's cluster is ever destroyed and recreated.** The annotations live only inside the
 cluster. The static IP itself survives, because it belongs to the stage resource group, not to the cluster.
