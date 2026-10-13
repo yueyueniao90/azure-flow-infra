@@ -21,16 +21,15 @@
 set -euo pipefail
 # shellcheck source=bootstrap/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../lib.sh"
+# shellcheck source=bootstrap/cluster-admin.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../cluster-admin.sh"
 
 usage() {
   sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
-CLUSTER_ADMIN_ROLE="Azure Kubernetes Service RBAC Cluster Admin"
 CERT_MANAGER_CHART="oci://quay.io/jetstack/charts/cert-manager"
 CERT_MANAGER_NAMESPACE="cert-manager"
-RETRY_SLEEP="${AZFLOW_RETRY_SLEEP:-10}"
-RBAC_WAIT_TRIES="${AZFLOW_RBAC_WAIT_TRIES:-30}"
 HERE="$AZFLOW_ROOT/bootstrap/cert-manager"
 
 stage=""
@@ -103,50 +102,10 @@ if [ "$stage" = production ]; then
   log "  (Bootstrap the staging stage's cluster first; see bootstrap/cert-manager/README.md.)"
 fi
 
-# ---- 1. Cluster Admin for the signed-in user ----------------------------------------------------
+# ---- 1. Cluster Admin for the signed-in user, 2. credentials (bootstrap/cluster-admin.sh) ---------
 
-log
-log "1. $CLUSTER_ADMIN_ROLE for you on $cluster"
-me="$(az ad signed-in-user show --query id -o tsv)"
-[ -n "$me" ] || die "could not read your object ID (az ad signed-in-user show); sign in as a user, not a service principal"
-cluster_id="$(az aks show --resource-group "$rg" --name "$cluster" --subscription "$sub" --query id -o tsv 2>/dev/null)" ||
-  die "cluster $cluster not found in $rg. Run that stage's first infra apply before this bootstrap."
-existing="$(az role assignment list --assignee "$me" --role "$CLUSTER_ADMIN_ROLE" --scope "$cluster_id" \
-  --subscription "$sub" -o json)"
-fresh=0
-if [ "$(printf '%s' "$existing" | jq 'length')" -gt 0 ]; then
-  log "  = already assigned"
-else
-  az role assignment create --assignee-object-id "$me" --assignee-principal-type User \
-    --role "$CLUSTER_ADMIN_ROLE" --scope "$cluster_id" --subscription "$sub" -o none
-  log "  + assigned"
-  fresh=1
-fi
-
-# ---- 2. credentials -----------------------------------------------------------------------------
-
-log
-log "2. Cluster credentials"
-# Entra-only cluster: the kubeconfig carries no credential; kubelogin fetches a token from your az sign-in.
-az aks get-credentials --resource-group "$rg" --name "$cluster" --subscription "$sub" \
-  --file "$KUBECONFIG_FILE" --overwrite-existing >/dev/null
-kubelogin convert-kubeconfig --login azurecli --kubeconfig "$KUBECONFIG_FILE"
-log "  + temporary kubeconfig for $cluster"
-
-# A new role assignment takes a few minutes to reach the cluster; until then the API server answers Forbidden.
-tries=0
-until [ "$(kubectl --kubeconfig "$KUBECONFIG_FILE" auth can-i create customresourcedefinitions.apiextensions.k8s.io 2>/dev/null || true)" = yes ]; do
-  tries=$((tries + 1))
-  [ "$tries" -lt "$RBAC_WAIT_TRIES" ] ||
-    die "you still cannot create CRDs on $cluster after $tries checks. If the role was just assigned, wait a few minutes and re-run."
-  if [ "$fresh" -eq 1 ]; then
-    log "  waiting for the new role assignment to reach the cluster (check $tries/$RBAC_WAIT_TRIES)..."
-  else
-    log "  cluster does not grant you cluster-admin yet (check $tries/$RBAC_WAIT_TRIES)..."
-  fi
-  sleep "$RETRY_SLEEP"
-done
-log "  = you can manage cluster-scoped resources"
+cluster_admin_kubeconfig "$sub" "$rg" "$cluster" "$KUBECONFIG_FILE" "create CRDs" \
+  create customresourcedefinitions.apiextensions.k8s.io
 
 # ---- 3. cert-manager ----------------------------------------------------------------------------
 

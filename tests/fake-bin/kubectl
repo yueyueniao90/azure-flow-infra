@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Fake kubectl for the offline tests. Answers only with a kubeconfig from the fake `az aks get-credentials` that the
 # fake kubelogin converted to azurecli login, and only these commands:
-#   get service nginx --namespace app-routing-system -o jsonpath=...   (ci/stage.sh api-dns)
-#   auth can-i create customresourcedefinitions.apiextensions.k8s.io  (bootstrap/cert-manager/install.sh)
+#   get service nginx --namespace app-routing-system -o jsonpath=...   (ci/stage.sh api-dns, bootstrap/ingress-ip/bind.sh)
+#   auth can-i <verb> <resource>                                       (bootstrap/cluster-admin.sh)
 #   get clusterissuer <name>; apply -f <ClusterIssuer file>            (bootstrap/cert-manager/install.sh)
+#   patch nginxingresscontroller default --type merge -p <json>        (bootstrap/ingress-ip/bind.sh)
 # State in $FAKE_AZ_STATE: ingress-ip (the Service's load-balancer IP; absent = still pending),
+# nginx-patch.<cluster> (the last merge patch of the default NginxIngressController; once it names a public IP that
+# exists as pip.<rg>.<name>, the Service reports that address, like the cloud provider binding it),
 # kubectl-forbidden-first (a count: that many calls fail Forbidden first, like a role assignment still propagating),
 # roles.jsonl (from the fake az: `auth can-i` answers yes once the Cluster Admin role is assigned on the cluster),
 # clusterissuer.<name> (each applied ClusterIssuer, as applied).
@@ -12,9 +15,11 @@ set -u
 : "${FAKE_AZ_STATE:?FAKE_AZ_STATE must point at a test state directory}"
 S="$FAKE_AZ_STATE"
 printf '%s\n' "$*" >>"$S/kubectl-calls.log"
-kubeconfig="" ns="" out="" file="" words=""
+kubeconfig="" ns="" out="" file="" words="" ptype="" patch=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    --type) ptype="$2" && shift ;;
+    -p) patch="$2" && shift ;;
     --kubeconfig) kubeconfig="$2" && shift ;;
     --namespace | -n) ns="$2" && shift ;;
     -o) out="$2" && shift ;;
@@ -53,9 +58,29 @@ case "$words" in
       echo "fake kubectl: unsupported output format '$out'" >&2
       exit 99
     }
+    if [ -f "$S/nginx-patch.$cluster" ]; then
+      pip="$(jq -r '.spec.loadBalancerAnnotations["service.beta.kubernetes.io/azure-pip-name"] // empty' "$S/nginx-patch.$cluster")"
+      prg="$(jq -r '.spec.loadBalancerAnnotations["service.beta.kubernetes.io/azure-load-balancer-resource-group"] // empty' "$S/nginx-patch.$cluster")"
+      if [ -f "$S/pip.$prg.$pip" ] && [ ! -f "$S/bind-slow" ]; then
+        cat "$S/pip.$prg.$pip"
+        exit 0
+      fi
+    fi
     [ -f "$S/ingress-ip" ] && cat "$S/ingress-ip"
     ;;
-  " auth can-i create customresourcedefinitions.apiextensions.k8s.io")
+  " patch nginxingresscontroller default")
+    [ "$ptype" = merge ] || {
+      echo "fake kubectl: patch the NginxIngressController with --type merge" >&2
+      exit 99
+    }
+    printf '%s' "$patch" | jq -e '.spec.loadBalancerAnnotations | type == "object"' >/dev/null || {
+      echo "fake kubectl: unsupported patch '$patch'" >&2
+      exit 99
+    }
+    printf '%s' "$patch" >"$S/nginx-patch.$cluster"
+    echo "nginxingresscontroller.approuting.kubernetes.azure.com/default patched"
+    ;;
+  " auth can-i "*)
     if [ -f "$S/kubectl-forbidden-first" ] && [ "$(cat "$S/kubectl-forbidden-first")" -gt 0 ]; then
       echo $(($(cat "$S/kubectl-forbidden-first") - 1)) >"$S/kubectl-forbidden-first"
       echo no

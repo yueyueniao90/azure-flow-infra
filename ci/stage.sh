@@ -10,8 +10,9 @@
 #                                            domain's TXT record while it runs; summary with name servers
 #   ci/stage.sh dns-auth <stage>            write the Static Web App custom domain's `_dnsauth.<host>` TXT record
 #                                            into the shared zone, if the domain is not already validated (idempotent)
-#   ci/stage.sh api-dns <stage>             point the stage's apiHost A record in the shared zone at the cluster's
-#                                            ingress IP (read with kubectl); no-op when it already does (idempotent)
+#   ci/stage.sh api-dns <stage>             point the stage's apiHost A record in the shared zone at the stage's
+#                                            static IP once the ingress answers there (read with kubectl); no-op
+#                                            when it already does (idempotent)
 #   ci/stage.sh aks <stop|start> <stage>    switch the stage's cluster off or on (idempotent)
 #   ci/stage.sh destroy <stage> [--shared]  delete the stage resource group, and with --shared the shared one too
 #
@@ -31,7 +32,7 @@ SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 summary() { printf '%s\n' "$*" >>"$SUMMARY"; }
 
 usage() {
-  sed -n '3,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '3,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 need_stage() {
@@ -62,6 +63,11 @@ strip_ansi() { sed $'s/\x1b\\[[0-9;]*[A-Za-z]//g'; }
 cluster_state() { # <stage>: Running, Stopped, ... or nothing when the cluster does not exist
   az aks list --resource-group "$(stage_get "$1" .resourceGroup)" --subscription "$AZFLOW_SUBSCRIPTION_ID" \
     --query "[?name=='$(stage_get "$1" .cluster)'].powerState.code | [0]" -o tsv
+}
+
+cluster_identity_type() { # <stage>: UserAssigned, SystemAssigned, ...
+  az aks show --resource-group "$(stage_get "$1" .resourceGroup)" --name "$(stage_get "$1" .cluster)" \
+    --subscription "$AZFLOW_SUBSCRIPTION_ID" --query identity.type -o tsv
 }
 
 cmd_missing_vars() {
@@ -118,6 +124,12 @@ cmd_apply() {
   state="$(cluster_state "$stage" || true)"
   if [ "$state" = Stopped ]; then
     die "cluster $(stage_get "$stage" .cluster) is stopped and Azure rejects updates to a stopped cluster. Run the 'cluster-start' workflow for $stage, then re-run this deployment (it can be stopped again afterwards)."
+  fi
+  # A cluster created before the shared public IP (README, "One public IP per stage") has a system-assigned identity
+  # and an AKS-managed outbound IP. Updating it in place would need a public IP the regional quota no longer has, and
+  # switching its identity takes hours to settle; it has to be deleted and recreated instead.
+  if [ -n "$state" ] && [ "$(cluster_identity_type "$stage")" != UserAssigned ]; then
+    die "cluster $(stage_get "$stage" .cluster) predates the shared public IP (its identity is not user-assigned). Delete it as described in README \"One public IP per stage\" (az aks delete --resource-group $rg --name $(stage_get "$stage" .cluster)), then re-run this deployment."
   fi
   name="azflow-$stage-${GITHUB_RUN_ID:-manual}"
   # The customDomains resource only finishes once Azure sees the `_dnsauth.<host>` TXT record, and its validation
@@ -219,8 +231,10 @@ cmd_dns_auth() {
 }
 
 # The API's ingress is AKS's application-routing add-on (managed NGINX). Its public IP is assigned by the cluster's
-# load balancer to the add-on's `nginx` Service in the `app-routing-system` namespace and is not an ARM output of the
-# cluster, so Bicep cannot write this record. Microsoft documents reading it with kubectl:
+# load balancer to the add-on's `nginx` Service in the `app-routing-system` namespace. It should be the stage's static
+# public IP (bicep/modules/aks.bicep), but only once bootstrap/ingress-ip/bind.sh has pointed the add-on at it, which
+# only the cluster can confirm; so this reads the Service and writes the record only when the two agree.
+# Microsoft documents reading the Service's IP with kubectl:
 #   kubectl get service -n app-routing-system nginx -o jsonpath="{.status.loadBalancer.ingress[0].ip}"
 # (https://learn.microsoft.com/azure/aks/app-routing). The cluster uses Azure RBAC for Kubernetes and the infra
 # identity holds no Kubernetes role by default, so this first grants it Azure Kubernetes Service RBAC Reader on that
@@ -252,20 +266,30 @@ ensure_ingress_reader() { # <stage>: namespace-scoped AKS RBAC Reader for the in
   summary "- \`$stage\`: granted the infra identity read-only access to namespace \`$INGRESS_NAMESPACE\` (to read the ingress IP)."
 }
 
-# ingress_ip <kubeconfig>: the ingress Service's public IPv4. Retries while the load balancer has not assigned one
-# yet and while a fresh role assignment is still propagating (kubectl then answers Forbidden).
+static_ip() { # <stage>: address of the stage's static public IP, empty when it does not exist
+  az network public-ip show --resource-group "$(stage_get "$1" .resourceGroup)" --name "$(public_ip_name "$1")" \
+    --subscription "$AZFLOW_SUBSCRIPTION_ID" --query ipAddress -o tsv 2>/dev/null || true
+}
+
+# ingress_ip <kubeconfig> <stage> <static ip>: the ingress Service's public IPv4, which must be the stage's static IP.
+# Retries while the load balancer has not assigned one yet and while a fresh role assignment is still propagating
+# (kubectl then answers Forbidden); stops at once when the Service holds a different address (not bound yet).
 ingress_ip() {
-  local kubeconfig="$1" n=1 max="${AZFLOW_INGRESS_ATTEMPTS:-30}" ip err
+  local kubeconfig="$1" stage="$2" want="$3" n=1 max="${AZFLOW_INGRESS_ATTEMPTS:-30}" ip err
   while :; do
     ip="$(kubectl --kubeconfig "$kubeconfig" get service "$INGRESS_SERVICE" --namespace "$INGRESS_NAMESPACE" \
       -o 'jsonpath={.status.loadBalancer.ingress[0].ip}' 2>"$kubeconfig.err")" || ip=""
     if [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+      if [ "$ip" != "$want" ]; then
+        warn "service $INGRESS_NAMESPACE/$INGRESS_SERVICE has IP $ip, not the stage's static IP $want: the ingress is not bound to it yet. Run once, as yourself: bootstrap/ingress-ip/bind.sh $stage (README, \"One public IP per stage\"), then re-run this workflow."
+        return 1
+      fi
       printf '%s' "$ip"
       return 0
     fi
     err="$(cat "$kubeconfig.err")"
     if [ "$n" -ge "$max" ]; then
-      warn "no public IP on service $INGRESS_NAMESPACE/$INGRESS_SERVICE after $max attempts${err:+ (last error: $err)}"
+      warn "no public IP on service $INGRESS_NAMESPACE/$INGRESS_SERVICE after $max attempts${err:+ (last error: $err)}. On a new cluster the ingress has no IP until it is bound to the stage's static IP $want: run once, as yourself, bootstrap/ingress-ip/bind.sh $stage (README, \"One public IP per stage\"), then re-run this workflow."
       return 1
     fi
     log "Ingress IP not readable yet (attempt $n/$max)${err:+: $err}" >&2
@@ -302,7 +326,7 @@ write_api_record() { # <stage> <ip>: make the apiHost A record hold exactly <ip>
 }
 
 cmd_api_dns() {
-  local stage="$1" cluster state kubeconfig ip
+  local stage="$1" cluster state kubeconfig ip want
   need_stage "$stage"
   need_subscription
   [ -n "${AZFLOW_INFRA_PRINCIPAL_ID:-}" ] ||
@@ -314,6 +338,8 @@ cmd_api_dns() {
   state="$(cluster_state "$stage")"
   [ -n "$state" ] || die "cluster $cluster does not exist. Run the apply workflow first."
   [ "$state" = Running ] || die "cluster $cluster is $state, so its ingress IP cannot be read. Run the 'cluster-start' workflow for $stage first."
+  want="$(static_ip "$stage")"
+  [ -n "$want" ] || die "the stage's static public IP $(public_ip_name "$stage") does not exist or has no address yet. Run the apply workflow first."
   ensure_ingress_reader "$stage"
   kubeconfig="$(mktemp)"
   # shellcheck disable=SC2064  # expand now: the local is gone when the trap fires
@@ -322,7 +348,7 @@ cmd_api_dns() {
   az aks get-credentials --resource-group "$(stage_get "$stage" .resourceGroup)" --name "$cluster" \
     --subscription "$AZFLOW_SUBSCRIPTION_ID" --file "$kubeconfig" --overwrite-existing >/dev/null
   kubelogin convert-kubeconfig --login azurecli --kubeconfig "$kubeconfig"
-  ip="$(ingress_ip "$kubeconfig")" || die "could not read the ingress IP of cluster $cluster; the A record for $(stage_get "$stage" .apiHost) was not changed."
+  ip="$(ingress_ip "$kubeconfig" "$stage" "$want")" || die "could not read the ingress IP of cluster $cluster; the A record for $(stage_get "$stage" .apiHost) was not changed."
   write_api_record "$stage" "$ip"
 }
 

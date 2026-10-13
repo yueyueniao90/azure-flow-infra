@@ -69,8 +69,9 @@ module staticWebApp 'modules/static-web-app.bicep' = {
   }
 }
 
-// The zone lives in the shared resource group. The apiHost A record is not declared here: the ingress IP is only
-// known inside the cluster, so the apply workflow writes it afterwards (ci/stage.sh api-dns).
+// The zone lives in the shared resource group. The apiHost A record is not declared here: it should only point at the
+// stage's static IP once the ingress really answers there, which only the cluster knows, so the apply workflow
+// writes it afterwards (ci/stage.sh api-dns).
 module dnsZone 'modules/dns-zone.bicep' = {
   name: 'dns-zone'
   scope: resourceGroup(sharedSubscription, sharedResourceGroup)
@@ -92,6 +93,7 @@ module webRecord 'modules/dns-cname.bicep' = {
 }
 
 output registryLoginServer string = registry.outputs.loginServer
+output publicIpAddress string = cluster.outputs.publicIpAddress
 output staticWebAppDefaultHostname string = staticWebApp.outputs.defaultHostname
 output webRecordFqdn string = webRecord.outputs.fqdn
 output dnsNameServers array = dnsZone.outputs.nameServers

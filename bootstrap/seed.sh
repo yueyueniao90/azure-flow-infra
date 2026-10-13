@@ -323,7 +323,7 @@ rbac_condition() { # <role id>...
 # namespace so it can read the ingress IP (README, "Access model").
 stage_rbac_condition() {
   rbac_condition "$ROLE_ACR_PUSH" "$ROLE_ACR_PULL" "$ROLE_AKS_CLUSTER_USER" "$ROLE_AKS_RBAC_WRITER" "$ROLE_AKS_RBAC_READER" \
-    "$ROLE_CONTRIBUTOR" "$ROLE_DNS_ZONE_CONTRIBUTOR"
+    "$ROLE_CONTRIBUTOR" "$ROLE_DNS_ZONE_CONTRIBUTOR" "$ROLE_NETWORK_CONTRIBUTOR"
 }
 
 squash() { tr -d ' \n\t'; }

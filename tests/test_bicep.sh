@@ -81,10 +81,10 @@ section "cost and security invariants of the compiled template"
 res="$(printf '%s' "$template" | jq -c '[.. | objects | select(has("type") and has("apiVersion")) | select(.type != "Microsoft.Resources/deployments")]')"
 q() { printf '%s' "$res" | jq -r "$1"; }
 types="$(q '[.[].type] | unique | .[]')"
-for t in Microsoft.ContainerRegistry/registries Microsoft.ContainerService/managedClusters Microsoft.Web/staticSites Microsoft.Web/staticSites/customDomains Microsoft.Network/dnsZones Microsoft.Network/dnsZones/CNAME Microsoft.Authorization/roleAssignments; do
+for t in Microsoft.ContainerRegistry/registries Microsoft.ContainerService/managedClusters Microsoft.Web/staticSites Microsoft.Web/staticSites/customDomains Microsoft.Network/dnsZones Microsoft.Network/dnsZones/CNAME Microsoft.Network/publicIPAddresses Microsoft.ManagedIdentity/userAssignedIdentities Microsoft.Authorization/roleAssignments; do
   assert_contains "declares $t" "$types" "$t"
 done
-for t in Microsoft.KeyVault Microsoft.OperationalInsights Microsoft.Insights Microsoft.Monitor Microsoft.Compute Microsoft.Network/publicIPAddresses Microsoft.Network/loadBalancers Microsoft.Authorization/roleDefinitions; do
+for t in Microsoft.KeyVault Microsoft.OperationalInsights Microsoft.Insights Microsoft.Monitor Microsoft.Compute Microsoft.Network/publicIPPrefixes Microsoft.Network/natGateways Microsoft.Network/loadBalancers Microsoft.Authorization/roleDefinitions; do
   assert_not_contains "does not declare $t" "$types" "$t"
 done
 assert_eq "AKS free control plane" "Free" "$(q '.[] | select(.type == "Microsoft.ContainerService/managedClusters") | .sku.tier')"
@@ -96,6 +96,22 @@ assert_eq "AKS app routing add-on" true "$(q '.[] | select(.type == "Microsoft.C
 assert_eq "AKS local accounts disabled" true "$(q '.[] | select(.type == "Microsoft.ContainerService/managedClusters") | .properties.disableLocalAccounts')"
 assert_eq "AKS Azure RBAC" true "$(q '.[] | select(.type == "Microsoft.ContainerService/managedClusters") | .properties.aadProfile.enableAzureRBAC')"
 assert_eq "AKS node size is a parameter" "[parameters('nodeSize')]" "$(q '.[] | select(.type == "Microsoft.ContainerService/managedClusters") | .properties.agentPoolProfiles[0].vmSize')"
+section "one public IP per stage, shared by outbound traffic and the ingress"
+# The subscription's regional public-IP quota is 3 for both stages together (README, "One public IP per stage").
+cl='.[] | select(.type == "Microsoft.ContainerService/managedClusters")'
+assert_eq "exactly one public IP" 1 "$(q '[.[] | select(.type == "Microsoft.Network/publicIPAddresses")] | length')"
+assert_eq "public IP is Standard (the cluster load balancer's SKU)" Standard "$(q '.[] | select(.type == "Microsoft.Network/publicIPAddresses") | .sku.name')"
+assert_eq "public IP is static" Static "$(q '.[] | select(.type == "Microsoft.Network/publicIPAddresses") | .properties.publicIPAllocationMethod')"
+assert_eq "public IP name matches lib.sh public_ip_name" "[format('pip-{0}', parameters('name'))]" "$(q '.[] | select(.type == "Microsoft.Network/publicIPAddresses") | .name')"
+assert_eq "cluster's only outbound IP is that public IP" "[resourceId('Microsoft.Network/publicIPAddresses', format('pip-{0}', parameters('name')))]" \
+  "$(q "$cl"' | .properties.networkProfile.loadBalancerProfile.outboundIPs.publicIPs | if length == 1 then .[0].id else "count \(length)" end')"
+assert_eq "no AKS-managed outbound IPs" null "$(q "$cl"' | .properties.networkProfile.loadBalancerProfile.managedOutboundIPs')"
+assert_eq "no outbound IP prefixes" null "$(q "$cl"' | .properties.networkProfile.loadBalancerProfile.outboundIPPrefixes')"
+assert_eq "outbound type stays the load balancer (no NAT gateway)" null "$(q "$cl"' | .properties.networkProfile.outboundType')"
+assert_eq "control plane uses the user-assigned identity" UserAssigned "$(q "$cl"' | .identity.type')"
+assert_contains "cluster waits for the identity's network role" "$(q "$cl"' | .dependsOn | join(" ")')" "Microsoft.Authorization/roleAssignments"
+assert_eq "public IP address is a deployment output" "[reference(resourceId('Microsoft.Resources/deployments', 'cluster'), '2025-04-01').outputs.publicIpAddress.value]" \
+  "$(printf '%s' "$template" | jq -r .outputs.publicIpAddress.value)"
 assert_eq "registry is Basic" Basic "$(q '.[] | select(.type == "Microsoft.ContainerRegistry/registries") | .sku.name')"
 assert_eq "registry admin user off" false "$(q '.[] | select(.type == "Microsoft.ContainerRegistry/registries") | .properties.adminUserEnabled')"
 assert_eq "static web app is Free" Free "$(q '.[] | select(.type == "Microsoft.Web/staticSites") | .sku.name')"
@@ -126,9 +142,11 @@ assert_eq "Azure Kubernetes Service RBAC Writer" "a7ffa36f-339b-4b5c-8bdf-e2c188
 assert_eq "Azure Kubernetes Service RBAC Reader" "7f6c6a51-bcf8-42ba-9220-52d62157d7db" "$ROLE_AKS_RBAC_READER"
 assert_eq "Contributor" "b24988ac-6180-42a0-ab88-20f7382dd24c" "$ROLE_CONTRIBUTOR"
 assert_eq "DNS Zone Contributor" "befefa01-2a29-4197-83a8-272ff33ce314" "$ROLE_DNS_ZONE_CONTRIBUTOR"
+assert_eq "Network Contributor" "4d97b98b-1d4f-4787-a291-c67834d212e7" "$ROLE_NETWORK_CONTRIBUTOR"
 assert_eq "Role Based Access Control Administrator" "f58310d9-a9f6-439a-9e8d-f62e7b41a168" "$ROLE_RBAC_ADMIN"
 for v in acrPushRoleId:ROLE_ACR_PUSH acrPullRoleId:ROLE_ACR_PULL clusterUserRoleId:ROLE_AKS_CLUSTER_USER \
-  rbacWriterRoleId:ROLE_AKS_RBAC_WRITER contributorRoleId:ROLE_CONTRIBUTOR dnsZoneContributorRoleId:ROLE_DNS_ZONE_CONTRIBUTOR; do
+  rbacWriterRoleId:ROLE_AKS_RBAC_WRITER contributorRoleId:ROLE_CONTRIBUTOR dnsZoneContributorRoleId:ROLE_DNS_ZONE_CONTRIBUTOR \
+  networkContributorRoleId:ROLE_NETWORK_CONTRIBUTOR; do
   bicep_id="$(grep -hoE "var ${v%%:*} = '[0-9a-f-]{36}'" modules/*.bicep | grep -oE "[0-9a-f-]{36}")"
   lib_var="${v#*:}"
   lib_id="${!lib_var}"
@@ -140,7 +158,7 @@ assigned="$(grep -hoE "RoleId = '[0-9a-f-]{36}'" modules/*.bicep | grep -oE "[0-
 [ -n "$assigned" ] && pass || fail "no role ids found in modules"
 for id in $assigned; do
   case "$id" in
-    "$ROLE_ACR_PUSH" | "$ROLE_ACR_PULL" | "$ROLE_AKS_CLUSTER_USER" | "$ROLE_AKS_RBAC_WRITER" | "$ROLE_CONTRIBUTOR" | "$ROLE_DNS_ZONE_CONTRIBUTOR") pass ;;
+    "$ROLE_ACR_PUSH" | "$ROLE_ACR_PULL" | "$ROLE_AKS_CLUSTER_USER" | "$ROLE_AKS_RBAC_WRITER" | "$ROLE_CONTRIBUTOR" | "$ROLE_DNS_ZONE_CONTRIBUTOR" | "$ROLE_NETWORK_CONTRIBUTOR") pass ;;
     *) fail "Bicep assigns role $id that the seed's RBAC condition does not allow" ;;
   esac
 done
@@ -156,8 +174,12 @@ assert_eq "Contributor is assigned exactly once" 1 "$(printf '%s\n' "$contributo
 assert_contains "Contributor is scoped to the Static Web App resource" "$contributor_scopes" "Microsoft.Web/staticSites'"
 assert_eq "role assignments all target service principals" 0 \
   "$(q '[.[] | select(.type == "Microsoft.Authorization/roleAssignments") | select(.properties.principalType != "ServicePrincipal")] | length')"
-assert_eq "role assignments are scoped to a resource" 0 \
-  "$(q '[.[] | select(.type == "Microsoft.Authorization/roleAssignments") | select((.scope // "") == "")] | length')"
+# One exception, Network Contributor for the cluster's control-plane identity: it is scoped to the stage group (no
+# scope property), because the cloud provider lists the group's public IPs (README, "One public IP per stage").
+assert_eq "role assignments are scoped to a resource, except the control plane's network role" "[variables('networkContributorRoleId')]" \
+  "$(q '[.[] | select(.type == "Microsoft.Authorization/roleAssignments") | select((.scope // "") == "") | .properties.roleDefinitionId] | if length == 1 then .[0] else "count \(length)" end' | sed "s/.*\(variables('[A-Za-z]*')\).*/[\1]/")"
+assert_eq "the group-scoped role goes to the control-plane identity" "[reference(resourceId('Microsoft.ManagedIdentity/userAssignedIdentities', format('id-{0}', parameters('name'))), '2023-01-31').principalId]" \
+  "$(q '.[] | select(.type == "Microsoft.Authorization/roleAssignments") | select((.scope // "") == "") | .properties.principalId')"
 condition_ids="$(AZFLOW_SUBSCRIPTION_ID=s "$REPO_ROOT/bootstrap/seed.sh" --dry-run | grep 'azflow-infra-staging on .*rg-azflow-staging, limited')"
 for id in $assigned; do assert_contains "seed condition for stage rg allows $id" "$condition_ids" "$id"; done
 # ci/stage.sh assigns roles too (api-dns: AKS RBAC Reader on the ingress namespace); the same condition must allow them.

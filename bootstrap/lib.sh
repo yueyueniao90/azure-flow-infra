@@ -39,6 +39,9 @@ ROLE_AKS_RBAC_WRITER="a7ffa36f-339b-4b5c-8bdf-e2c188b2c0eb"
 # Not assigned by Bicep: ci/stage.sh api-dns grants it to the infra identity on one namespace (README, "Access model").
 ROLE_AKS_RBAC_READER="7f6c6a51-bcf8-42ba-9220-52d62157d7db"
 ROLE_DNS_ZONE_CONTRIBUTOR="befefa01-2a29-4197-83a8-272ff33ce314"
+# For the cluster's control-plane identity on its own stage group, so AKS can use the stage's static public IP for
+# outbound traffic and the ingress (README, "One public IP per stage").
+ROLE_NETWORK_CONTRIBUTOR="4d97b98b-1d4f-4787-a291-c67834d212e7"
 
 log() { printf '%s\n' "$*"; }
 warn() { printf 'warning: %s\n' "$*" >&2; }
@@ -127,6 +130,10 @@ record_name() {
 
 # Registered Entra app display name for a role ("infra", "web", "api") in a stage, or "infra-preview".
 identity_name() { printf 'azflow-%s-%s' "$1" "$2"; }
+
+# public_ip_name <stage>: the stage's one static public IP (cluster outbound and ingress), named in
+# bicep/modules/aks.bicep as 'pip-<cluster>' in the stage resource group.
+public_ip_name() { printf 'pip-%s' "$(stage_get "$1" .cluster)"; }
 
 # validate_distinct: the stages must not share resource names, and must agree on the shared group.
 validate_distinct() {

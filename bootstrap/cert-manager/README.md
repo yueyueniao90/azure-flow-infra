@@ -19,6 +19,9 @@ or a trial reset) — cert-manager and the ClusterIssuers live only inside that 
 ## Prerequisites
 
 - That stage's first infra apply has run (the cluster and the shared DNS zone both exist).
+- The ingress is bound to the stage's static public IP (`bootstrap/ingress-ip/bind.sh <stage>`, see
+  `bootstrap/ingress-ip/README.md`) and the apply that followed has pointed `apiHost` at it: the HTTP-01
+  challenge is fetched from that address. On a recreated cluster, run `bind.sh` first, then this script.
 - The Route 53 → Azure DNS delegation for `demo.zzll.de` has propagated everywhere, not just from one
   resolver (main README, "DNS: delegating `demo.zzll.de` from Route 53 to Azure"). Verify with:
   ```bash
