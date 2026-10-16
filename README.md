@@ -13,7 +13,8 @@ the manual workflows that stop, start and destroy the demo so it does not run up
 stages/            per-stage settings (staging.json, production.json)
 bicep/             main.bicep (stage entry point), staging/production .bicepparam, modules/ (one per resource kind)
 bootstrap/         preflight.sh (read-only checks), seed.sh (one-time setup), github-environments.sh, lib.sh (shared),
-                   cert-manager/ (manual TLS bootstrap for AKS, see "HTTPS")
+                   cluster-admin.sh (shared by the two manual cluster bootstraps), ingress-ip/ (manual one-IP binding,
+                   see "One public IP per stage"), cert-manager/ (manual TLS bootstrap for AKS, see "HTTPS")
 ci/                stage.sh: the logic the workflows call, testable offline against the fake `az`
 .github/workflows/ checks, preview, apply, cluster-stop, cluster-start, destroy (see "The pipeline" below)
 tests/             offline test suite: tests/run.sh
@@ -27,7 +28,7 @@ tests/             offline test suite: tests/run.sh
 | [GitHub CLI](https://cli.github.com/) (`gh`), authenticated | seed writes repository variables (optional: otherwise it prints them); `bootstrap/github-environments.sh` needs admin rights on the repository |
 | `jq` | preflight, seed, github-environments, tests |
 | `shellcheck`, the Bicep CLI (standalone [`bicep`](https://aka.ms/bicep-install) or `az bicep`), [`actionlint`](https://github.com/rhysd/actionlint) | tests only |
-| [Helm](https://helm.sh/docs/intro/install/), `kubectl`, `kubelogin` | the captain's manual cert-manager bootstrap only (`bootstrap/cert-manager/install.sh`, see "HTTPS"); no pipeline needs Helm, and the tests use fakes |
+| [Helm](https://helm.sh/docs/intro/install/), `kubectl`, `kubelogin` | the captain's manual cluster bootstraps only (`bootstrap/ingress-ip/bind.sh`, see "One public IP per stage", which needs no Helm; `bootstrap/cert-manager/install.sh`, see "HTTPS"); no pipeline needs Helm, and the tests use fakes |
 
 You need to be able to create app registrations in your Entra tenant and to assign roles on the subscription
 (Owner of the subscription is enough). The scripts also run on the macOS default bash (3.2).
@@ -146,7 +147,7 @@ variables). Empty means the corresponding role assignments are skipped.
 | Module | Creates | Role assignments made there |
 | --- | --- | --- |
 | `registry.bicep` | Container Registry, Basic tier, admin user off | AcrPush for the api identity |
-| `aks.bicep` | AKS, free control plane, one node, no autoscaler, no add-ons except managed application routing (ingress), Entra-only access | Cluster User Role and RBAC Writer for the api identity |
+| `aks.bicep` | AKS, free control plane, one node, no autoscaler, no add-ons except managed application routing (ingress), Entra-only access; the stage's one static public IP (`pip-<cluster>`, the cluster's outbound IP and, once bound, its ingress IP) and the cluster's user-assigned control-plane identity (`id-<cluster>`); see "One public IP per stage" | Cluster User Role and RBAC Writer for the api identity; Network Contributor on the stage group for the control-plane identity |
 | `registry-pull.bicep` | | AcrPull for the cluster's kubelet identity on the stage registry |
 | `static-web-app.bicep` | Static Web App, Free plan, plus a `customDomains` child resource binding `webHost` (`dns-txt-token` validation; see "HTTPS" below) | Contributor on the Static Web App resource only, for the web identity |
 | `dns-zone.bicep` | Azure DNS zone in the shared group (both stages declare it identically) | DNS Zone Contributor for the api identity |
@@ -159,7 +160,7 @@ To use `kubectl` yourself, give your user a role such as *Azure Kubernetes Servi
 
 | Identity (Entra app) | Token subject | Rights |
 | --- | --- | --- |
-| `azflow-infra-<stage>` | infra repo, environment `<stage>` | On its own stage group: Contributor, plus Role Based Access Control Administrator **limited by an ABAC condition** to assigning and removing only AcrPush, AcrPull, AKS Cluster User, AKS RBAC Writer, AKS RBAC Reader, Contributor and DNS Zone Contributor. On the shared group (only the DNS zone lives there): Contributor, plus RBAC Administrator limited to DNS Zone Contributor. The apply pipeline also gives it AKS RBAC Reader on its own cluster's `app-routing-system` namespace only (see "DNS records for the stage hosts"). |
+| `azflow-infra-<stage>` | infra repo, environment `<stage>` | On its own stage group: Contributor, plus Role Based Access Control Administrator **limited by an ABAC condition** to assigning and removing only AcrPush, AcrPull, AKS Cluster User, AKS RBAC Writer, AKS RBAC Reader, Contributor, DNS Zone Contributor and Network Contributor. On the shared group (only the DNS zone lives there): Contributor, plus RBAC Administrator limited to DNS Zone Contributor. The apply pipeline also gives it AKS RBAC Reader on its own cluster's `app-routing-system` namespace only (see "DNS records for the stage hosts"). |
 | `azflow-web-<stage>` | `azure-flow-web`, branch `main` | Reader on its own stage group; Contributor on its own Static Web App resource only (from Bicep) |
 | `azflow-api-<stage>` | `azure-flow-api`, branch `main` | Reader on its own stage group; AcrPush, AKS Cluster User and RBAC Writer, DNS Zone Contributor on single resources (from Bicep) |
 | `azflow-infra-preview` | infra repo, `pull_request` | Reader plus the custom role `azflow-deployment-whatif` (only `deployments/whatIf/action` and deployment reads; `ci/stage.sh` runs what-if with `--validation-level ProviderNoRbac` so no write permission is checked) on the stage groups and the shared group; role names are unique per tenant, so it is defined once, assignable to every group in every subscription |
@@ -174,7 +175,10 @@ role ID could be verified offline). Because Bicep assigns it, Contributor is in 
 infra identity can hand Contributor to another principal within its own stage group, which is no more than it already
 holds there. The shared group's condition still allows DNS Zone Contributor only. AKS RBAC Reader is in the stage-group condition
 because `ci/stage.sh api-dns` grants it to the infra identity itself, scoped to one namespace, to read the ingress IP;
-it is read-only and a subset of AKS RBAC Writer, which the condition already allowed.
+it is read-only and a subset of AKS RBAC Writer, which the condition already allowed. Network Contributor is in the
+stage-group condition because Bicep grants it to the cluster's own control-plane identity on the stage group, so
+AKS can use the stage's static public IP (see "One public IP per stage"); it is narrower than Contributor, which
+the condition already allowed. Existing setups need the seed re-run once to pick it up.
 The ABAC condition string (built by `bootstrap/seed.sh`'s `rbac_condition()`) quotes the action name inside
 `ActionMatches{...}` as a single-quoted string literal, e.g. `ActionMatches{'Microsoft.Authorization/roleAssignments/write'}`;
 Azure rejects an unquoted action name with `InvalidCreateOrUpdateRoleAssignmentRequest`. The `GuidEquals {...}`
@@ -268,7 +272,7 @@ See "DNS" below for the exact record.
 | --- | --- |
 | Static Web Apps, Free plan | The cluster VM (`nodeSize`), one per cluster: the bulk of the cost |
 | AKS control plane, free tier | Two Container Registries, Basic tier (small daily fee each) |
-| Resource groups, role assignments, app registrations, federated credentials | Public IP and load balancer the cluster creates for ingress, and the node's OS disk (32 GB, set small) |
+| Resource groups, role assignments, app registrations, federated credentials, the user-assigned control-plane identities | One static public IP per stage (shared by outbound traffic and the ingress, see "One public IP per stage"), the cluster's load balancer, and the node's OS disk (32 GB, set small) |
 | Resource provider registration | The Azure DNS zone (small monthly fee plus per-query cost) |
 
 Deliberately not used: monitoring or Log Analytics, Key Vault, autoscaling, extra nodes, premium tiers. Use the
@@ -314,11 +318,14 @@ needs two ordinary records in the shared zone, and the apply pipeline writes bot
 | Record | Written by | Points at |
 | --- | --- | --- |
 | `webHost` CNAME (`staging`, `app`) | Bicep, `bicep/modules/dns-cname.bicep`, in the same deployment | the Static Web App's `defaultHostname` |
-| `apiHost` A (`api-staging`, `api`) | `ci/stage.sh api-dns <stage>`, a step after the deployment | the public IP of the cluster's ingress controller |
+| `apiHost` A (`api-staging`, `api`) | `ci/stage.sh api-dns <stage>`, a step after the deployment | the stage's static public IP, once the cluster's ingress controller answers on it |
 
-The A record cannot be Bicep: the ingress is the AKS application-routing add-on (managed NGINX), whose public IP is
-assigned by the cluster's load balancer to the add-on's `nginx` Service in the `app-routing-system` namespace. It
-is not an output of the cluster resource. Microsoft's documented way to read it is
+The A record is not Bicep: the ingress is the AKS application-routing add-on (managed NGINX), whose public IP is
+assigned by the cluster's load balancer to the add-on's `nginx` Service in the `app-routing-system` namespace. That
+should be the stage's static IP, but only after the one-time `bootstrap/ingress-ip/bind.sh` (see "One public IP per
+stage"), and only the cluster can confirm it. `api-dns` therefore reads the Service and writes the record only when
+the Service reports the static IP; if it reports another address, `api-dns` stops at once and names `bind.sh`.
+Microsoft's documented way to read the Service's IP is
 `kubectl get service -n app-routing-system nginx -o jsonpath="{.status.loadBalancer.ingress[0].ip}"`
 ([application routing add-on](https://learn.microsoft.com/azure/aks/app-routing)), so that is what `api-dns` does.
 The cluster uses Azure RBAC for Kubernetes, so the infra identity first grants itself *Azure Kubernetes Service RBAC
@@ -327,18 +334,83 @@ Reader* on that one namespace (built-in role, read-only, cannot read Secrets; na
 cluster's user kubeconfig comes from `az aks get-credentials`, which Contributor on the stage group already allows,
 and `kubelogin --login azurecli` turns the pipeline's `az` sign-in into the cluster token. A new grant can take up
 to five minutes to take effect, and a new cluster's load balancer can take a while to assign the IP, so `api-dns`
-retries for up to about ten minutes. It then adds the IP to the A record and removes any other address; when the
+retries for up to about ten minutes (a new cluster's ingress also has no address until `bind.sh` has run, so the
+message on giving up names it too). It then adds the IP to the A record and removes any other address; when the
 record already holds exactly that IP it changes nothing.
 
 The rejected alternative was reading the load balancer's public IP resource from the cluster's node resource group
 (`MC_<group>_<cluster>_<region>`). It would need Reader on a group AKS creates and names itself, which does not exist
 when the seed runs, so the seed cannot grant it before the first apply. That grant would also expose every resource
-in the group (VM scale set, disks, load balancer). And it would have to pick the ingress IP from the other public IPs
-there, such as the cluster's outbound IP, without a documented way to tell them apart.
+in the group (VM scale set, disks, load balancer). The stage's static IP now lives in the stage group instead (see
+"One public IP per stage"), but its address alone does not show whether the ingress is bound to it yet, so the
+Service stays the source of truth.
 
 **Existing setups: re-run `bootstrap/seed.sh` once before the next apply.** It adds AKS RBAC Reader to the stage
 group's ABAC condition and writes the new `AZFLOW_<S>_INFRA_PRINCIPAL_ID` repository variable (the infra identity's
 object ID, which `api-dns` assigns the role to). Until then, `api-dns` stops with a message naming the seed.
+
+## One public IP per stage
+
+The subscription (a free trial) allows only **3 public IP addresses in the stage region, for both stages together**.
+By default an AKS cluster uses two: one AKS creates for outbound internet access and one the ingress controller
+gets for inbound traffic. Two stages would need four, so production's ingress never got an address. A quota
+increase is not an option here: it is a recurring cost, and a free-trial subscription usually cannot get one
+without leaving the free trial. So each stage uses **one** static public IP for both directions, at no extra cost:
+
+1. **Bicep** (`bicep/modules/aks.bicep`) creates a static Standard public IP `pip-<cluster>` in the stage group and
+   sets it as the cluster's only outbound IP (`networkProfile.loadBalancerProfile.outboundIPs`); AKS then creates no
+   outbound IP of its own.
+2. **A one-time, captain-run script**, `bootstrap/ingress-ip/bind.sh <stage>`, points the application-routing
+   add-on's default NGINX ingress controller at the same IP. It sets two load-balancer annotations on the add-on's
+   `NginxIngressController` named `default`, `service.beta.kubernetes.io/azure-pip-name` and
+   `service.beta.kubernetes.io/azure-load-balancer-resource-group`, as Microsoft documents for a static ingress IP
+   ([application routing: NGINX configuration](https://learn.microsoft.com/azure/aks/app-routing-nginx-configuration)).
+   The Kubernetes cloud provider then puts the ingress rules on the outbound frontend that already uses this IP;
+   sharing one IP for outbound and inbound traffic works since Kubernetes 1.20
+   ([Azure/AKS#1791](https://github.com/Azure/AKS/issues/1791)). AKS keeps these annotations because the default
+   controller is `AnnotationControlled` (the add-on's default). The ingress class and the `nginx` Service keep their
+   names, so the api's Ingress and `ci/stage.sh api-dns` are unaffected. See
+   [`bootstrap/ingress-ip/README.md`](bootstrap/ingress-ip/README.md) for why this is manual.
+
+**Identity and permission.** The IP lives in the stage group, outside the cluster's node resource group, so AKS
+needs a role on it. Microsoft documents *Network Contributor* on the IP's resource group: the cloud provider lists
+the group's public IPs to find the one the ingress names, so a grant on the IP alone is not enough. The stage group
+holds no other network resource. The role has to exist before the cluster uses the IP, which a system-assigned
+identity cannot do (it only exists once the cluster does), so the cluster's control plane now uses a user-assigned
+identity `id-<cluster>`, created and granted in the same deployment before the cluster. A brand-new role assignment
+can take a few minutes to propagate; if a first apply fails on the IP's permissions, re-run it.
+
+**Moving an existing stage to one IP (once).** A cluster created before this change has a system-assigned identity
+and an AKS-managed outbound IP. It cannot be updated in place: the new static IP would exceed the quota before the
+old one is released, and switching a cluster's identity takes hours to settle. `ci/stage.sh apply` therefore stops
+on such a cluster and names the steps below. Recreate one stage at a time, as yourself (`az login`), after re-running
+`bootstrap/seed.sh` once so the infra identities may grant Network Contributor.
+
+Staging goes first, and its API is the one that goes offline first, because `apply.yml` always runs
+`apply-staging` before `apply-production` (`needs: apply-staging`): production's job only runs once staging's
+succeeds.
+
+1. Delete staging's cluster:
+   `az aks delete --resource-group rg-azflow-staging --name aks-azflow-staging --subscription "$AZFLOW_SUBSCRIPTION_ID"`.
+   This frees both of its IPs. The staging API is offline, and its address changes, until step 3 is done.
+2. Run `apply.yml`. Staging creates `pip-aks-azflow-staging` and a new cluster that uses it. Its `api-dns` step
+   fails until step 3, saying so, so production does not run yet.
+3. `bootstrap/ingress-ip/bind.sh staging`, then re-run `apply.yml`. Staging goes green (`api-dns` writes the A
+   record); production's job then runs and stops at its refusal of its old cluster. Then run
+   `bootstrap/cert-manager/install.sh staging --email <address>` (README there) and redeploy the api to the new
+   staging cluster from `azure-flow-api`; staging's API is back online.
+4. Delete production's cluster:
+   `az aks delete --resource-group rg-azflow-prod --name aks-azflow-prod --subscription "$AZFLOW_SUBSCRIPTION_ID"`.
+5. Re-run `apply.yml` and approve production. It creates `pip-aks-azflow-prod` and a new cluster; its `api-dns`
+   step fails until step 6.
+6. `bootstrap/ingress-ip/bind.sh production`, then re-run `apply.yml`.
+7. `bootstrap/cert-manager/install.sh production --email <address>` and redeploy the api to the new production
+   cluster from `azure-flow-api`.
+
+Afterwards each stage holds exactly one public IP, two in total. A new cluster's ingress briefly takes a temporary
+IP of its own until `bind.sh` runs (or stays pending if the quota is full), and the cloud provider releases it once
+the ingress is bound. Both `bind.sh` and cert-manager must be re-run whenever a stage's cluster is recreated; the
+static IP, and with it the A record, survive a cluster recreation.
 
 ## HTTPS
 
@@ -382,7 +454,7 @@ tests/run.sh
 One command, offline. It runs shellcheck over all scripts (including `ci/stage.sh` and the fakes), builds and lints
 all Bicep files (warnings fail), checks cost and security invariants of the compiled template (free tiers, one
 node, no monitoring or Key Vault, role assignments limited to what the seed's RBAC condition allows), runs the
-preflight, the seed, `bootstrap/github-environments.sh`, `bootstrap/cert-manager/install.sh` and `ci/stage.sh` against a fake `az`, `gh`, `kubectl`, `kubelogin` and `helm` on `PATH`
+preflight, the seed, `bootstrap/github-environments.sh`, `bootstrap/cert-manager/install.sh`, `bootstrap/ingress-ip/bind.sh` and `ci/stage.sh` against a fake `az`, `gh`, `kubectl`, `kubelogin` and `helm` on `PATH`
 (dry run, first run, idempotent second run, least-privilege scopes, retries, separate subscriptions per stage), and
 checks the workflow files themselves with `actionlint` plus repository-specific rules (every third-party action
 pinned to a full commit SHA, least-privilege `permissions` per job, `id-token: write` only where a job logs in, no
@@ -413,8 +485,15 @@ signs in or touches a subscription. Without either tool the suite fails with ins
   that grant at all; that is for the `azure-flow-api` repo to decide.
 - `ci/stage.sh api-dns` is verified offline only (fake `az`, `kubectl`, `kubelogin`): the namespace-scoped role
   assignment, the `kubelogin --login azurecli` token and the record-set field names `az network dns record-set a show`
-  prints are unproven until a real apply. The ingress IP is only re-read on an apply; if a cluster is ever recreated
-  and gets a new IP, re-run `apply.yml`. The record keeps Azure's default one-hour TTL.
+  prints are unproven until a real apply. The ingress IP is only re-read on an apply. The record keeps Azure's
+  default one-hour TTL.
+- The one-IP setup (see "One public IP per stage") is verified offline only: the shared outbound/inbound frontend,
+  the `NginxIngressController` patch (`bootstrap/ingress-ip/bind.sh`, against a fake `kubectl`), Network Contributor
+  at stage-group scope being enough for the cloud provider, and the user-assigned control-plane identity are unproven
+  until the first real recreation of a cluster. The add-on's default controller type `AnnotationControlled` is relied
+  on as Azure's default; pinning it in Bicep needs the cluster API version 2025-02-01 or later (this repo uses
+  2024-09-01). The application-routing add-on's NGINX is supported by Microsoft through November 2026; its Gateway
+  API successor will need the same IP binding redone.
 - The apply job signs in twice: `az` fetches every new access token with the GitHub OIDC token from its sign-in, and that
   expires within minutes (`AADSTS700024`), which is long before a deployment finishes and the cluster token is needed.
 - A custom role for the infra identities could replace Contributor with an exact action list.

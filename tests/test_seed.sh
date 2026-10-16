@@ -110,7 +110,7 @@ assert_eq "what-if role has no write actions" 0 "$(jq '[.Actions[] | select(test
 
 section "RBAC Administrator is conditioned to the roles Bicep and ci/stage.sh assign"
 cond="$(jq -s -r '[.[] | select(.principalId == "obj-azflow-infra-staging" and .roleDefinitionName == "Role Based Access Control Administrator" and .scope == "'"$S"'/rg-azflow-staging")][0].condition' "$roles")"
-for id in "$ROLE_ACR_PUSH" "$ROLE_ACR_PULL" "$ROLE_AKS_CLUSTER_USER" "$ROLE_AKS_RBAC_WRITER" "$ROLE_AKS_RBAC_READER" "$ROLE_CONTRIBUTOR" "$ROLE_DNS_ZONE_CONTRIBUTOR"; do
+for id in "$ROLE_ACR_PUSH" "$ROLE_ACR_PULL" "$ROLE_AKS_CLUSTER_USER" "$ROLE_AKS_RBAC_WRITER" "$ROLE_AKS_RBAC_READER" "$ROLE_CONTRIBUTOR" "$ROLE_DNS_ZONE_CONTRIBUTOR" "$ROLE_NETWORK_CONTRIBUTOR"; do
   assert_contains "condition allows $id" "$cond" "$id"
 done
 for id in "$ROLE_RBAC_ADMIN" "18d7d88d-d35e-4fb5-a5c3-7773c20a72d9" "8e3af657-a8ff-443c-a75c-2fe8c4bcb635"; do
@@ -128,6 +128,7 @@ assert_contains "shared rg allows DNS Zone Contributor" "$shared_cond" "$ROLE_DN
 assert_not_contains "shared rg does not allow AcrPush" "$shared_cond" "$ROLE_ACR_PUSH"
 assert_not_contains "shared rg does not allow Contributor" "$shared_cond" "$ROLE_CONTRIBUTOR"
 assert_not_contains "shared rg does not allow AKS RBAC Reader" "$shared_cond" "$ROLE_AKS_RBAC_READER"
+assert_not_contains "shared rg does not allow Network Contributor" "$shared_cond" "$ROLE_NETWORK_CONTRIBUTOR"
 assert_contains "shared rg condition also quotes ActionMatches" "$shared_cond" "ActionMatches{'Microsoft.Authorization/roleAssignments/write'}"
 
 section "GitHub variables"

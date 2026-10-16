@@ -346,10 +346,27 @@ case "$cmd" in
     esac
     ;;
   "aks show")
+    # identity.type: UserAssigned unless $S/aks-identity.<name> says otherwise (a cluster from before the shared IP).
     n="$(opt --name "$@")"
     [ -f "$S/aks.$n" ] || fail "ResourceNotFound: $n" 3
-    [ "$(opt --query "$@")" = id ] || fail "unsupported query: $*" 99
-    echo "/subscriptions/$(opt --subscription "$@")/resourceGroups/$(opt --resource-group "$@")/providers/Microsoft.ContainerService/managedClusters/$n"
+    case "$(opt --query "$@")" in
+      id) echo "/subscriptions/$(opt --subscription "$@")/resourceGroups/$(opt --resource-group "$@")/providers/Microsoft.ContainerService/managedClusters/$n" ;;
+      identity.type) if [ -f "$S/aks-identity.$n" ]; then cat "$S/aks-identity.$n"; else echo UserAssigned; fi ;;
+      *) fail "unsupported query: $*" 99 ;;
+    esac
+    ;;
+  "network public-ip")
+    # Static public IPs: $S/pip.<resource group>.<name> holds the address.
+    [ "$sub3" = show ] || fail "unsupported: $*" 99
+    rg="$(opt --resource-group "$@")"
+    f="$S/pip.$rg.$(opt --name "$@")"
+    [ -e "$S/rg.$rg" ] || fail "ResourceGroupNotFound" 3
+    [ -f "$f" ] || fail "(ResourceNotFound) The Resource 'Microsoft.Network/publicIPAddresses/$(opt --name "$@")' was not found" 3
+    case "$(opt --query "$@")" in
+      ipAddress) cat "$f" ;;
+      id) echo "/subscriptions/$(opt --subscription "$@")/resourceGroups/$rg/providers/Microsoft.Network/publicIPAddresses/$(opt --name "$@")" ;;
+      *) fail "unsupported query: $*" 99 ;;
+    esac
     ;;
   "aks get-credentials")
     # Writes a kubeconfig naming the cluster; tests/fake-bin/kubelogin converts it and kubectl insists on both.

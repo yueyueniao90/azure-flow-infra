@@ -28,6 +28,11 @@ run_ci_stdout() {
   set -e
 }
 seed_groups() { : >"$FAKE_AZ_STATE/rg.rg-azflow-staging" && : >"$FAKE_AZ_STATE/rg.rg-azflow-prod" && : >"$FAKE_AZ_STATE/rg.rg-azflow-shared"; }
+# bound <ip> [staging|prod]: the stage's static public IP has <ip> and the ingress Service reports it (bind.sh has run).
+bound() {
+  printf '%s' "$1" >"$FAKE_AZ_STATE/pip.rg-azflow-${2:-staging}.pip-aks-azflow-${2:-staging}"
+  printf '%s' "$1" >"$FAKE_AZ_STATE/ingress-ip"
+}
 
 section "missing-vars"
 new_state
@@ -75,6 +80,7 @@ case "$OUT" in *$'\033'*) fail "ANSI colour codes leaked into the markdown" ;; *
 assert_file_contains "what-if targets the stage group" "$FAKE_AZ_STATE/calls.log" "deployment group what-if --resource-group rg-azflow-staging --subscription sub-test"
 assert_file_contains "what-if skips RBAC write checks (preview identity is read-only)" "$FAKE_AZ_STATE/calls.log" "--validation-level ProviderNoRbac"
 assert_file_contains "parameters passed through" "$FAKE_AZ_STATE/deploy-env.log" "sub=sub-test suffix=sfx api=api-1 web=web-1"
+
 assert_not_contains "never deploys" "$(cat "$FAKE_AZ_STATE/calls.log")" "deployment group create"
 
 section "what-if: failure is reported and fails the step"
@@ -84,6 +90,20 @@ assert_eq "exit code" 1 "$RC"
 assert_contains "failure in the comment" "$OUT" "What-if failed"
 assert_contains "the error text" "$OUT" "deployment failed"
 rm -f "$FAKE_AZ_STATE/deploy-fails"
+
+section "what-if: a cluster from before the shared public IP is not previewed"
+new_state
+seed_groups
+echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
+echo SystemAssigned >"$FAKE_AZ_STATE/aks-identity.aks-azflow-staging"
+run_ci_stdout what-if staging
+assert_eq "exit code" 0 "$RC"
+assert_contains "explains" "$OUT" "predates the shared public IP"
+assert_not_contains "no what-if call" "$(cat "$FAKE_AZ_STATE/calls.log")" "deployment group what-if"
+rm -f "$FAKE_AZ_STATE/aks-identity.aks-azflow-staging"
+run_ci_stdout what-if staging
+assert_eq "recreated cluster: previewed" 0 "$RC"
+assert_file_contains "recreated cluster: what-if runs" "$FAKE_AZ_STATE/calls.log" "deployment group what-if"
 
 section "apply"
 new_state
@@ -213,6 +233,24 @@ run_ci dns-auth production
 assert_eq "exit code" 0 "$RC"
 assert_file_contains "production record name" "$FAKE_AZ_STATE/calls.log" "--record-set-name _dnsauth.app --value tok-prod"
 
+section "apply: a cluster from before the shared public IP must be recreated, not updated"
+new_state
+seed_groups
+echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
+echo SystemAssigned >"$FAKE_AZ_STATE/aks-identity.aks-azflow-staging"
+run_ci apply staging
+assert_eq "exit code" 2 "$RC"
+assert_contains "explains" "$OUT" "predates the shared public IP"
+assert_contains "names the delete command" "$OUT" "az aks delete --resource-group rg-azflow-staging --name aks-azflow-staging"
+assert_not_contains "no deployment started" "$(cat "$FAKE_AZ_STATE/calls.log")" "deployment group create"
+echo Stopped >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
+run_ci apply staging
+assert_eq "stopped old cluster: the stopped message wins" 2 "$RC"
+assert_contains "names cluster-start" "$OUT" "cluster-start"
+rm -f "$FAKE_AZ_STATE/aks.aks-azflow-staging"
+run_ci apply staging
+assert_eq "no cluster yet: deploys" 0 "$RC"
+
 section "dns-auth: unknown stage"
 run_ci dns-auth nowhere
 assert_eq "exit code" 2 "$RC"
@@ -222,7 +260,7 @@ export AZFLOW_INGRESS_ATTEMPTS=3
 new_state
 seed_groups
 echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
-printf '20.1.2.3' >"$FAKE_AZ_STATE/ingress-ip"
+bound 20.1.2.3
 run_ci api-dns staging
 assert_eq "without the infra principal: fails" 2 "$RC"
 assert_contains "points at the seed" "$OUT" "AZFLOW_INFRA_PRINCIPAL_ID"
@@ -252,8 +290,8 @@ assert_not_contains "role lookup avoids --assignee (a Graph lookup the pipeline 
 assert_eq "no second record write" "$before" "$(grep -c "record-set a add-record" "$FAKE_AZ_STATE/calls.log")"
 assert_eq "record unchanged" "20.1.2.3" "$(cat "$FAKE_AZ_STATE/a.rg-azflow-shared.demo.zzll.de.api-staging")"
 
-section "api-dns: a changed ingress IP replaces the old address"
-printf '20.9.9.9' >"$FAKE_AZ_STATE/ingress-ip"
+section "api-dns: a changed static IP (stage group recreated) replaces the old address"
+bound 20.9.9.9
 run_ci api-dns staging
 assert_eq "exit code" 0 "$RC"
 assert_eq "only the new address is left" "20.9.9.9" "$(cat "$FAKE_AZ_STATE/a.rg-azflow-shared.demo.zzll.de.api-staging")"
@@ -266,23 +304,42 @@ section "api-dns: waits out a propagating role assignment and a pending load bal
 new_state
 seed_groups
 echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
+printf '20.4.5.6' >"$FAKE_AZ_STATE/pip.rg-azflow-staging.pip-aks-azflow-staging"
 echo 1 >"$FAKE_AZ_STATE/kubectl-forbidden-first"
 run_ci api-dns staging
 assert_eq "no IP yet after the attempts: fails" 2 "$RC"
 assert_contains "explains" "$OUT" "could not read the ingress IP"
 assert_contains "shows the Forbidden while it waited" "$OUT" "Forbidden"
+assert_contains "a pending ingress on a new cluster points at bind.sh" "$OUT" "bootstrap/ingress-ip/bind.sh staging"
 [ ! -e "$FAKE_AZ_STATE/a.rg-azflow-shared.demo.zzll.de.api-staging" ] && pass || fail "wrote a record without an IP"
 echo 1 >"$FAKE_AZ_STATE/kubectl-forbidden-first"
-printf '20.4.5.6' >"$FAKE_AZ_STATE/ingress-ip"
+bound 20.4.5.6
 run_ci api-dns staging
 assert_eq "succeeds once readable" 0 "$RC"
 assert_eq "record written" "20.4.5.6" "$(cat "$FAKE_AZ_STATE/a.rg-azflow-shared.demo.zzll.de.api-staging")"
+
+section "api-dns: an ingress not yet bound to the static IP stops at once, without touching the record"
+new_state
+seed_groups
+echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
+printf '20.1.2.3' >"$FAKE_AZ_STATE/pip.rg-azflow-staging.pip-aks-azflow-staging"
+printf '51.9.9.9' >"$FAKE_AZ_STATE/ingress-ip"
+AZFLOW_INGRESS_ATTEMPTS=30 run_ci api-dns staging
+assert_eq "exit code" 2 "$RC"
+assert_contains "names both addresses" "$OUT" "has IP 51.9.9.9, not the stage's static IP 20.1.2.3"
+assert_contains "names the bind script" "$OUT" "bootstrap/ingress-ip/bind.sh staging"
+assert_count "no retries on a wrong address" 1 "$FAKE_AZ_STATE/kubectl-calls.log" "get service nginx"
+[ ! -e "$FAKE_AZ_STATE/a.rg-azflow-shared.demo.zzll.de.api-staging" ] && pass || fail "wrote a record for the unbound address"
+rm -f "$FAKE_AZ_STATE/pip.rg-azflow-staging.pip-aks-azflow-staging"
+run_ci api-dns staging
+assert_eq "no static IP: exit code" 2 "$RC"
+assert_contains "no static IP: run apply" "$OUT" "pip-aks-azflow-staging does not exist"
 
 section "api-dns: another principal's grant on the namespace does not count"
 new_state
 seed_groups
 echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-staging"
-printf '20.1.2.3' >"$FAKE_AZ_STATE/ingress-ip"
+bound 20.1.2.3
 jq -cn --arg r "$ROLE_AKS_RBAC_READER" --arg s "$ns_scope" '{id: "ra-other", principalId: "obj-someone-else", roleDefinitionName: $r, scope: $s, condition: null}' >"$FAKE_AZ_STATE/roles.jsonl"
 run_ci api-dns staging
 assert_eq "exit code" 0 "$RC"
@@ -304,7 +361,7 @@ section "api-dns: production uses the production host and cluster"
 new_state
 seed_groups
 echo Running >"$FAKE_AZ_STATE/aks.aks-azflow-prod"
-printf '20.7.7.7' >"$FAKE_AZ_STATE/ingress-ip"
+bound 20.7.7.7 prod
 AZFLOW_INFRA_PRINCIPAL_ID=obj-infra-prod run_ci api-dns production
 assert_eq "exit code" 0 "$RC"
 assert_eq "production record" "20.7.7.7" "$(cat "$FAKE_AZ_STATE/a.rg-azflow-shared.demo.zzll.de.api")"
